@@ -53,7 +53,7 @@ LOG_FILE       = os.path.join(BASE_DIR, "scanner.log")
 
 MIN_PRICE       = 1.0
 MAX_PRICE       = 20.0
-SCAN_EVERY_MIN  = 5
+SCAN_EVERY_MIN  = 2
 ALERT_COOLDOWN  = 1800    # seconds before same stock can re-alert
 SCAN_WORKERS    = 10      # stocks fetched in parallel
 PORTFOLIO_SIZE  = 10_000  # default portfolio $ for position sizing
