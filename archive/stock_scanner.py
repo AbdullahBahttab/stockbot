@@ -55,6 +55,9 @@ MIN_PRICE       = 1.0
 MAX_PRICE       = 20.0
 SCAN_EVERY_MIN  = 2
 ALERT_COOLDOWN  = 1800    # seconds before same stock can re-alert
+MOMENTUM_ALERTS = True    # separate "high-risk momentum" channel for big runners
+                          # the strict filter rejects (unverified pumps). Set False to silence.
+MOMENTUM_MIN_FROM_HIGH = 0.50  # skip if price has collapsed below this fraction of day high
 SCAN_WORKERS    = 10      # stocks fetched in parallel
 PORTFOLIO_SIZE  = 10_000  # default portfolio $ for position sizing
 FLOAT_CACHE_TTL = 86_400  # float doesn't change daily — cache 24 h
@@ -353,6 +356,7 @@ def test_claude() -> bool:
 # ═══════════════════════════════════════════════════════════════
 _lock           = threading.Lock()
 alerted         = {}               # symbol → unix timestamp
+momentum_alerted = {}              # symbol → unix timestamp (high-risk channel cooldown)
 watchlist_log   = deque(maxlen=50)
 portfolio       = {}               # user_id → {symbol → position}
 _last_removed   = {}               # uid → {sym, pos} — for UNDO
@@ -1483,6 +1487,47 @@ def build_alert_simple(stock: dict, fv: dict, session: str) -> str:
     )
 
 
+def build_momentum_alert(stock: dict, fv: dict, session: str, reject_reason: str = "") -> str:
+    """High-risk momentum alert — a big runner the strict filter rejected.
+    Clearly flagged as UNVERIFIED / risky so it's never confused with a Grade alert."""
+    sym    = stock["symbol"]
+    price  = fv.get("price") or stock["price"]
+    change = stock["change"]
+    news   = fv.get("news", "")
+    flt    = fv.get("float_m")
+    rsi    = fv.get("rsi")
+    rv     = fv.get("rel_vol")
+    h, l   = fv.get("high"), fv.get("low")
+    _, cat_label = score_catalyst(news)
+    tgt          = calc_targets(price, fv)
+    entry_lo     = round(price * 0.99, 2)
+    entry_hi     = round(price * 1.01, 2)
+    D = "━━━━━━━━━━━━━━━━━━━━"
+
+    stats = []
+    if flt is not None: stats.append(f"Float {flt:.1f}M")
+    if rsi is not None: stats.append(f"RSI {rsi:.0f}")
+    if rv  is not None: stats.append(f"RelVol {rv:.0f}x")
+    if h and l and h != l:
+        stats.append(f"Range {range_bar(price, h, l)}")
+    stats_line = ("  •  ".join(stats) + "\n") if stats else ""
+    why_line   = f"⚠️ <i>Strict filter skipped: {reject_reason}</i>\n" if reject_reason else ""
+    news_line  = f"<i>{news[:120]}</i>\n" if news and news != "—" else ""
+
+    return (
+        f"⚡ <b>HIGH-RISK MOMENTUM — {sym}</b>   ${price:.2f}   {change:+.1f}%\n"
+        f"🚨 <b>UNVERIFIED PUMP — not a Grade alert. Trade small, fast stop.</b>\n"
+        f"{stats_line}"
+        f"Entry    ${entry_lo} – ${entry_hi}\n"
+        f"Stop     ${tgt['stop']}   -{tgt['stop_pct']}%  (keep it tight)\n"
+        f"📰 {cat_label}\n"
+        f"{news_line}"
+        f"{why_line}"
+        f"{D}\n"
+        f"💬 <code>/check {sym}</code> for full analysis"
+    )
+
+
 def build_alert(stock: dict, fv: dict, session: str) -> str:
     """Full alert (used by /check) — same clean format as broadcast."""
     sym    = stock["symbol"]
@@ -1684,6 +1729,7 @@ def check_portfolio():
 # ═══════════════════════════════════════════════════════════════
 
 def handle_command(uid: str, text: str, sender_name: str = "", sender_username: str = ""):
+    global MOMENTUM_ALERTS
     uid = str(uid)
     cmd = text.strip().lower()
 
@@ -1824,7 +1870,23 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
             f"  RSI     : &lt;{f['max_rsi']} (parabolic block)\n\n"
             f"Your positions  : {n_pos}\n"
             f"Stocks alerted  : {n_alert}\n"
+            f"Momentum chan.  : {'⚡ ON' if MOMENTUM_ALERTS else 'OFF'}\n"
             f"Active users    : {n_users}"
+        )
+
+    elif cmd.startswith("/momentum"):
+        if not is_admin(uid):
+            send_to(uid, "❌ Admin only command.")
+            return
+        parts = text.strip().split()
+        if len(parts) >= 2 and parts[1].lower() in ("on", "off"):
+            MOMENTUM_ALERTS = (parts[1].lower() == "on")
+        else:
+            MOMENTUM_ALERTS = not MOMENTUM_ALERTS
+        send_to(uid,
+            f"⚡ <b>High-risk momentum channel: {'ON' if MOMENTUM_ALERTS else 'OFF'}</b>\n\n"
+            f"{'Big runners the strict filter rejects (unverified pumps) will be sent — clearly labeled as risky.' if MOMENTUM_ALERTS else 'Only strict Grade A/B alerts will be sent.'}\n\n"
+            f"Toggle: /momentum on  |  /momentum off"
         )
 
     elif cmd == "/watchlist":
@@ -2131,7 +2193,8 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
             "\n\n<b>Admin commands (you only):</b>\n"
             "/adduser 123456789    → approve user\n"
             "/removeuser 123456789 → remove user\n"
-            "/users                → list all users"
+            "/users                → list all users\n"
+            "/momentum on|off      → toggle high-risk momentum channel"
         ) if is_admin(uid) else ""
         send_to(uid,
             "📖 <b>Commands</b>\n\n"
@@ -2159,7 +2222,8 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
             "<b>Grades:</b>\n"
             "🅰️ A = strong setup — best trades\n"
             "🅱️ B = good setup\n"
-            "⚠️ C = weak — not alerted"
+            "⚠️ C = weak — not alerted\n"
+            "⚡ HIGH-RISK MOMENTUM = big runner, unverified pump — risky, trade small"
             + admin_section
         )
 
@@ -2288,6 +2352,38 @@ def passes_filters(stock: dict, fv: dict, f: dict) -> tuple:
         return False, ai_reason
     return True, ""
 
+def is_high_risk_momentum(stock: dict, fv: dict, f: dict) -> bool:
+    """A stock the STRICT filter rejected, but that's still a real, tradeable
+    runner — big move + genuine liquidity you can actually exit. These are the
+    'unverified pump' rejects (weak/no catalyst, micro-float, near peak, faded
+    off high) — NOT junk (thin liquidity, dying volume, out of range, nano-cap).
+    Fires the separate high-risk channel; never the main strict alerts."""
+    p   = fv.get("price") or stock["price"]
+    chg = stock["change"]
+    vol = fv.get("volume") or stock["volume"]
+    rsi = fv.get("rsi")
+    mc  = fv.get("mcap_m")
+    mfi = fv.get("mfi")
+    h   = fv.get("high")
+
+    # Must be a genuine runner inside the tradeable price range
+    if not (MIN_PRICE <= p <= MAX_PRICE):                return False
+    if chg < f["min_change"]:                            return False
+    # Hard liquidity floor — money you can actually get back out of (no exception
+    # for rel-vol here: a tiny-float pump shows huge rel-vol while nothing trades)
+    dollar_vol = (p or 0) * (vol or 0)
+    if vol and dollar_vol < f.get("min_dollar_vol", 0): return False
+    # Not actively dumping / momentum already dead
+    if rsi is not None and rsi < 45:                     return False
+    if mfi and mfi >= 90 and (rsi is None or rsi > 75):  return False
+    # Not cap garbage
+    if mc and mc < 1:                                    return False
+    # Already fully collapsed off the high — past momentum, not a play anymore
+    if h and h > 0 and p < h * MOMENTUM_MIN_FROM_HIGH:   return False
+    # Quality floor — must not be bottom-tier on every dimension
+    if compute_grade(stock, fv) == "C":                 return False
+    return True
+
 def _process_stock(stock: dict, f: dict):
     sym     = stock["symbol"]
     session = get_session() or "UNK"
@@ -2296,15 +2392,24 @@ def _process_stock(stock: dict, f: dict):
         return None
     grade = compute_grade(stock, fv)
     passed, reason = passes_filters(stock, fv, f)
-    if not passed:
-        log.info(f"  Skip {sym:6s}  ${stock['price']:.2f}  {stock['change']:+.0f}%  "
-                 f"RSI={fv.get('rsi','?')}  Float={fv.get('float_m','?')}M  Grade={grade}  [{reason}]")
+    if passed:
         if db.DB_OK:
-            db.db_log_scan(sym, stock["price"], stock["change"], grade, False, reason, session)
-        return None
+            db.db_log_scan(sym, fv.get("price") or stock["price"], stock["change"], grade, True, "", session)
+        return (stock, fv, grade, "alert", "")
+    # Strict filter rejected — but is it still a tradeable high-risk runner?
+    if MOMENTUM_ALERTS and is_high_risk_momentum(stock, fv, f):
+        log.info(f"  ⚡Momo {sym:6s}  ${stock['price']:.2f}  {stock['change']:+.0f}%  "
+                 f"RSI={fv.get('rsi','?')}  Float={fv.get('float_m','?')}M  Grade={grade}  "
+                 f"[high-risk; strict reject: {reason}]")
+        if db.DB_OK:
+            db.db_log_scan(sym, fv.get("price") or stock["price"], stock["change"], grade,
+                           False, f"MOMENTUM: {reason}", session)
+        return (stock, fv, grade, "momentum", reason)
+    log.info(f"  Skip {sym:6s}  ${stock['price']:.2f}  {stock['change']:+.0f}%  "
+             f"RSI={fv.get('rsi','?')}  Float={fv.get('float_m','?')}M  Grade={grade}  [{reason}]")
     if db.DB_OK:
-        db.db_log_scan(sym, fv.get("price") or stock["price"], stock["change"], grade, True, "", session)
-    return (stock, fv, grade)
+        db.db_log_scan(sym, stock["price"], stock["change"], grade, False, reason, session)
+    return None
 
 def run_scan(requester_id=None):
     def _reply(msg):
@@ -2372,11 +2477,15 @@ def run_scan(requester_id=None):
             if r:
                 results.append(r)
 
+    # Split the two channels: strict Grade alerts vs high-risk momentum
+    alerts   = [r for r in results if r[3] == "alert"]
+    momentum = [r for r in results if r[3] == "momentum"]
+
     # A grades first
-    results.sort(key=lambda x: x[2])
+    alerts.sort(key=lambda x: x[2])
 
     sent = 0
-    for stock, fv, grade in results:
+    for stock, fv, grade, _tier, _reason in alerts:
         sym = stock["symbol"]
         with _lock:
             if (time.time() - alerted.get(sym, 0)) < ALERT_COOLDOWN:
@@ -2449,6 +2558,23 @@ def run_scan(requester_id=None):
 
         time.sleep(0.5)
 
+    # ── High-risk momentum channel — big runners the strict filter rejected ──
+    momo_sent = 0
+    for stock, fv, grade, _tier, reason in momentum:
+        sym = stock["symbol"]
+        with _lock:
+            # Skip if already sent on EITHER channel recently (no double-spam)
+            if (time.time() - momentum_alerted.get(sym, 0)) < ALERT_COOLDOWN:
+                continue
+            if (time.time() - alerted.get(sym, 0)) < ALERT_COOLDOWN:
+                continue
+        broadcast(build_momentum_alert(stock, fv, session, reason))
+        with _lock:
+            momentum_alerted[sym] = time.time()
+        momo_sent += 1
+        log.info(f"  ⚡Momentum → {sym}  ${stock['price']:.2f}  ({stock['change']:+.1f}%)  Grade={grade}")
+        time.sleep(0.5)
+
     # ── Tracked symbols — always scan regardless of gainers list ──
     with _lock:
         tracked = set(tracked_symbols)
@@ -2475,8 +2601,11 @@ def run_scan(requester_id=None):
     check_portfolio()
 
     if sent == 0:
-        log.info("  No A/B grade matches")
-        _reply("🔍 Scan done — no Grade A/B stocks right now. Filters are working but nothing qualifies yet.")
+        log.info(f"  No A/B grade matches  ({momo_sent} high-risk momentum sent)")
+        if momo_sent:
+            _reply(f"🔍 Scan done — no Grade A/B stocks, but {momo_sent} high-risk momentum runner(s) sent. ⚡")
+        else:
+            _reply("🔍 Scan done — no Grade A/B stocks right now. Filters are working but nothing qualifies yet.")
 
 
 def reset_stale_cooldowns():
@@ -2553,8 +2682,9 @@ def reset_daily():
     with _lock:
         count = len(watchlist_log)
         watchlist_log.clear()
+        momentum_alerted.clear()
     save_watchlist()
-    log.info(f"[Daily Reset] watchlist_log cleared ({count} entries) — fresh start for today")
+    log.info(f"[Daily Reset] watchlist_log + momentum cooldowns cleared ({count} entries) — fresh start for today")
 
 
 def check_alert_performance():
