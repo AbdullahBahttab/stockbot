@@ -1696,6 +1696,71 @@ def check_portfolio():
 #  TELEGRAM COMMANDS
 # ═══════════════════════════════════════════════════════════════
 
+TERMS_TEXT = (
+    "⚠️ <b>RISK DISCLAIMER</b>\n\n"
+    "This bot is for educational and informational purposes only and is "
+    "<b>NOT financial advice</b>. All trades are your own decision and at your own risk.\n\n"
+    "The bot and its operator are <b>NOT responsible for any losses and do not "
+    "bear them</b>. Alerts — especially ⚡ HIGH-RISK MOMENTUM — are highly volatile "
+    "and can fall sharply within minutes.\n\n"
+    "Never invest money you cannot afford to lose. Always use a stop loss. "
+    "By using this bot you accept full responsibility for your own trades.\n\n"
+    "━━━━━━━━━━━━━━━━━━━━\n"
+    "⚠️ <b>إخلاء المسؤولية</b>\n\n"
+    "هذا البوت لأغراض تعليمية ومعلوماتية فقط وليس نصيحة مالية. "
+    "جميع الصفقات قرارك وعلى مسؤوليتك الخاصة.\n\n"
+    "البوت ومشغّله <b>غير مسؤولين عن أي خسائر ولا يتحمّلونها</b>. "
+    "التنبيهات — خاصة ⚡ الزخم عالي المخاطر — متقلبة جدًا وقد تنخفض بسرعة.\n\n"
+    "لا تستثمر أموالًا لا تستطيع تحمّل خسارتها. استخدم دائمًا وقف الخسارة. "
+    "باستخدامك هذا البوت فإنك تتحمل كامل المسؤولية عن صفقاتك.\n\n"
+    "✅ Reply /accept to agree  ·  أرسل /accept للموافقة"
+)
+
+GUIDE_TEXT = (
+    "📘 <b>How to Use / كيفية الاستخدام</b>\n\n"
+    "<b>📊 Grades / التقييمات</b>\n"
+    "🅰️ A = strong setup — best trades\n"
+    "🅱️ B = good setup\n"
+    "⚠️ C = weak — not alerted\n"
+    "⚡ HIGH-RISK MOMENTUM = big runner, unverified pump — risky, trade small\n\n"
+    "<b>💼 Position commands / أوامر الصفقات</b>\n"
+    "<code>BUY NNVC 1.75</code>       → track a new buy (shares optional)\n"
+    "<code>BUY NNVC 1.75 100</code>   → buy with shares\n"
+    "<code>ADD NNVC 1.80 100</code>   → average in a second buy\n"
+    "<code>SELL NNVC</code>           → stop tracking\n"
+    "<code>SELL NNVC 2.10 100</code>  → stop + log P&amp;L\n"
+    "<code>EDIT BUY NNVC 1.70</code>  → fix a wrong buy price\n"
+    "<code>EDIT SELL NNVC 2.10</code> → fix last sell price\n"
+    "<code>UNDO</code>                → restore last sold position\n\n"
+    "The bot alerts you on stop-loss and exit signals.\n"
+    "ينبّهك البوت عند وقف الخسارة وإشارات الخروج."
+)
+
+ACCEPT_PROMPT = (
+    "⚠️ <b>Before you start</b>\n\n"
+    "Please read the risk disclaimer:  /terms\n"
+    "Then reply <b>/accept</b> to confirm you understand and agree.\n\n"
+    "⚠️ <b>قبل البدء</b>\n"
+    "يرجى قراءة إخلاء المسؤولية:  /terms\n"
+    "ثم أرسل <b>/accept</b> للموافقة والمتابعة."
+)
+
+
+def _account_box(uid: str) -> str:
+    u     = users.get(uid, {})
+    name  = u.get("name") or uid
+    uname = u.get("username")
+    login = f"{name}  (or @{uname})" if uname else name
+    pin   = db.db_get_pin(uid) if db.DB_OK else "1234"
+    return (
+        f"👤 <b>Your account</b>\n"
+        f"Name  : {name}\n"
+        f"Login : {login}\n"
+        f"PIN   : {pin}\n"
+        f"📊 Dashboard: http://localhost:8050\n"
+    )
+
+
 def handle_command(uid: str, text: str, sender_name: str = "", sender_username: str = ""):
     global MOMENTUM_ALERTS
     uid = str(uid)
@@ -1712,6 +1777,26 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
         send_to(uid, "⏳ Access request sent to admin.\nYou will be notified once approved.")
         return
 
+    # ── Disclaimer acceptance gate (one-time; admins exempt) ──
+    if not is_admin(uid) and not users.get(uid, {}).get("accepted"):
+        base = cmd.split()[0] if cmd else ""
+        if base == "/accept":
+            with _lock:
+                if uid in users:
+                    users[uid]["accepted"]    = True
+                    users[uid]["accepted_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            save_users()
+            send_to(uid,
+                "✅ <b>Thank you — terms accepted.</b>\nأهلًا بك! تم قبول الشروط.\n\n"
+                + _account_box(uid)
+                + "\n📘 /guide — commands &amp; grades\n📖 /help — all commands"
+            )
+            return
+        if base not in ("/terms", "/disclaimer", "/guide"):
+            send_to(uid, ACCEPT_PROMPT)
+            return
+        # /terms and /guide are allowed before accepting — fall through
+
     if cmd.startswith("/adduser"):
         if not is_admin(uid):
             send_to(uid, "❌ Admin only command.")
@@ -1726,12 +1811,8 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
                 db.db_set_pin(target, "1234")
             send_to(uid,    f"✅ User {target} added.")
             send_to(target,
-                "✅ <b>Access granted!</b>\n\n"
-                "Send /help to see available commands.\n\n"
-                "📊 <b>Dashboard access:</b>\n"
-                "URL : http://localhost:8050\n"
-                "User: your Telegram name\n"
-                "PIN : 1234  (change with /setpin XXXX)"
+                "✅ <b>Access granted!</b>  ·  تم منح الوصول\n\n"
+                + ACCEPT_PROMPT
             )
         else:
             send_to(uid, f"✅ User {target} re-activated.")
@@ -2154,42 +2235,38 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
                 "To activate Claude: add credits at console.anthropic.com"
             )
 
+    elif cmd in ("/terms", "/disclaimer"):
+        send_to(uid, TERMS_TEXT)
+
+    elif cmd == "/guide":
+        send_to(uid, GUIDE_TEXT)
+
+    elif cmd == "/accept":
+        send_to(uid, "✅ You have already accepted the terms.\nتم قبول الشروط مسبقًا.")
+
     elif cmd in ("/help", "/start"):
         admin_section = (
-            "\n\n<b>Admin commands (you only):</b>\n"
+            "\n\n<b>Admin (you only):</b>\n"
             "/adduser 123456789    → approve user\n"
             "/removeuser 123456789 → remove user\n"
             "/users                → list all users\n"
-            "/momentum on|off      → toggle high-risk momentum channel"
+            "/momentum on|off      → toggle momentum channel"
         ) if is_admin(uid) else ""
         send_to(uid,
             "📖 <b>Commands</b>\n\n"
-            "/check NNVC   → full analysis on any stock\n"
-            "/scan         → trigger scan now\n"
+            + _account_box(uid) + "\n"
+            "/check NNVC   → full analysis on a stock\n"
+            "/scan         → scan now\n"
             "/status       → session & filter info\n"
-            "/claude       → Claude AI status\n"
             "/watchlist    → last 10 alerts\n"
-            "/portfolio    → your tracked positions\n"
-            "/track NNVC   → always scan this symbol every cycle\n"
-            "/untrack NNVC → remove from tracked list\n"
-            "/setpin 1234  → change your dashboard PIN\n\n"
-            "<b>Position tracking:</b>\n"
-            "BUY NNVC 1.75        → new buy (shares optional)\n"
-            "BUY NNVC 1.75 100   → new buy with shares\n"
-            "ADD NNVC 1.80 100    → second buy (averages entry)\n"
-            "SELL NNVC            → stop tracking\n"
-            "SELL NNVC 2.10 100   → stop + log P&L\n\n"
-            "<b>Fix mistakes:</b>\n"
-            "EDIT BUY NNVC 1.70        → correct wrong buy price\n"
-            "EDIT BUY NNVC 1.70 100    → correct buy price + shares\n"
-            "EDIT SELL NNVC 2.10       → correct last sell price\n"
-            "EDIT SELL NNVC 2.10 100   → correct sell price + shares\n"
-            "UNDO                      → restore last sold position\n\n"
-            "<b>Grades:</b>\n"
-            "🅰️ A = strong setup — best trades\n"
-            "🅱️ B = good setup\n"
-            "⚠️ C = weak — not alerted\n"
-            "⚡ HIGH-RISK MOMENTUM = big runner, unverified pump — risky, trade small"
+            "/portfolio    → your positions\n"
+            "/track NNVC   → always scan a symbol\n"
+            "/untrack NNVC → remove from tracked\n"
+            "/setpin 1234  → change your dashboard PIN\n"
+            "/claude       → Claude AI status\n\n"
+            "📘 /guide  → buy/sell commands &amp; grades\n"
+            "⚠️ /terms  → risk disclaimer\n\n"
+            "<i>The bot is NOT responsible for any losses. See /terms.</i>"
             + admin_section
         )
 

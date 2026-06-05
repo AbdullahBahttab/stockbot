@@ -139,6 +139,23 @@ def db_set_pin(chat_id: str, pin: str):
         conn.close()
 
 
+def db_get_pin(chat_id: str) -> str:
+    """Return the user's dashboard PIN, or '1234' if unset / DB unavailable."""
+    conn = get_conn()
+    if not conn:
+        return "1234"
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT pin FROM users WHERE chat_id = ?", int(chat_id))
+        row = cur.fetchone()
+        return str(row[0]) if row and row[0] else "1234"
+    except Exception as e:
+        log.error(f"[DB] get_pin {chat_id}: {e}")
+        return "1234"
+    finally:
+        conn.close()
+
+
 def db_sync_users(users_dict: dict):
     """Sync the full in-memory users dict to SQL Server."""
     for uid, u in users_dict.items():
