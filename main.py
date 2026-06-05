@@ -210,6 +210,22 @@ def db_set_pin(chat_id: str, pin: str):
         conn.close()
 
 
+def db_get_pin(chat_id: str) -> str:
+    """Return the user's dashboard PIN, or '1234' if unset / DB unavailable."""
+    conn = get_conn()
+    if not conn:
+        return "1234"
+    try:
+        cur = conn.execute("SELECT pin FROM users WHERE chat_id=?", (int(chat_id),))
+        row = cur.fetchone()
+        return str(row[0]) if row and row[0] else "1234"
+    except Exception as e:
+        log.error(f"[DB] get_pin {chat_id}: {e}")
+        return "1234"
+    finally:
+        conn.close()
+
+
 def db_sync_users(users_dict: dict):
     for uid, u in users_dict.items():
         db_upsert_user(uid, u.get("name", uid), u.get("username", ""),
@@ -606,6 +622,9 @@ MIN_PRICE       = 1.0
 MAX_PRICE       = 20.0
 SCAN_EVERY_MIN  = 2
 ALERT_COOLDOWN  = 1800    # seconds before same stock can re-alert
+MOMENTUM_ALERTS = True    # separate "high-risk momentum" channel for big runners
+                          # the strict filter rejects (unverified pumps). Set False to silence.
+MOMENTUM_MIN_FROM_HIGH = 0.50  # skip if price has collapsed below this fraction of day high
 SCAN_WORKERS    = 10      # stocks fetched in parallel
 PORTFOLIO_SIZE  = 10_000  # default portfolio $ for position sizing
 FLOAT_CACHE_TTL = 86_400  # float doesn't change daily — cache 24 h
@@ -904,6 +923,7 @@ def test_claude() -> bool:
 # ═══════════════════════════════════════════════════════════════
 _lock           = threading.Lock()
 alerted         = {}               # symbol → unix timestamp
+momentum_alerted = {}              # symbol → unix timestamp (high-risk channel cooldown)
 watchlist_log   = deque(maxlen=50)
 portfolio       = {}               # user_id → {symbol → position}
 _last_removed   = {}               # uid → {sym, pos} — for UNDO
@@ -2038,12 +2058,52 @@ def build_alert_simple(stock: dict, fv: dict, session: str) -> str:
     news_line = f"<i>{news[:120]}</i>\n" if news and news != "—" else ""
     return (
         f"{grade_icon} <b>{sym}</b>   ${price:.2f}   {change:+.1f}%\n"
-        f"{gap_line(price, fv)}"
         f"Entry    ${entry_lo} – ${entry_hi}\n"
         f"Stop     ${tgt['stop']}   -{tgt['stop_pct']}%\n"
         f"{tgt['label']}\n"
         f"📰 {cat_label}\n"
         f"{news_line}"
+        f"{D}\n"
+        f"💬 <code>/check {sym}</code> for full analysis"
+    )
+
+
+def build_momentum_alert(stock: dict, fv: dict, session: str, reject_reason: str = "") -> str:
+    """High-risk momentum alert — a big runner the strict filter rejected.
+    Clearly flagged as UNVERIFIED / risky so it's never confused with a Grade alert."""
+    sym    = stock["symbol"]
+    price  = fv.get("price") or stock["price"]
+    change = stock["change"]
+    news   = fv.get("news", "")
+    flt    = fv.get("float_m")
+    rsi    = fv.get("rsi")
+    rv     = fv.get("rel_vol")
+    h, l   = fv.get("high"), fv.get("low")
+    _, cat_label = score_catalyst(news)
+    tgt          = calc_targets(price, fv)
+    entry_lo     = round(price * 0.99, 2)
+    entry_hi     = round(price * 1.01, 2)
+    D = "━━━━━━━━━━━━━━━━━━━━"
+
+    stats = []
+    if flt is not None: stats.append(f"Float {flt:.1f}M")
+    if rsi is not None: stats.append(f"RSI {rsi:.0f}")
+    if rv  is not None: stats.append(f"RelVol {rv:.0f}x")
+    if h and l and h != l:
+        stats.append(f"Range {range_bar(price, h, l)}")
+    stats_line = ("  •  ".join(stats) + "\n") if stats else ""
+    why_line   = f"⚠️ <i>Strict filter skipped: {reject_reason}</i>\n" if reject_reason else ""
+    news_line  = f"<i>{news[:120]}</i>\n" if news and news != "—" else ""
+
+    return (
+        f"⚡ <b>HIGH-RISK MOMENTUM — {sym}</b>   ${price:.2f}   {change:+.1f}%\n"
+        f"🚨 <b>UNVERIFIED PUMP — not a Grade alert. Trade small, fast stop.</b>\n"
+        f"{stats_line}"
+        f"Entry    ${entry_lo} – ${entry_hi}\n"
+        f"Stop     ${tgt['stop']}   -{tgt['stop_pct']}%  (keep it tight)\n"
+        f"📰 {cat_label}\n"
+        f"{news_line}"
+        f"{why_line}"
         f"{D}\n"
         f"💬 <code>/check {sym}</code> for full analysis"
     )
@@ -2067,11 +2127,8 @@ def build_alert(stock: dict, fv: dict, session: str) -> str:
 
     return (
         f"{grade_icon} <b>{sym}</b>   ${price:.2f}   {change:+.1f}%\n"
-        f"{gap_line(price, fv)}"
         f"Entry    ${entry_lo} – ${entry_hi}\n"
         f"Stop     ${tgt['stop']}   -{tgt['stop_pct']}%\n"
-        f"T1       ${tgt['t1']}   +{tgt['t1_pct']}%  → sell 50%\n"
-        f"T2       ${tgt['t2']}   +{tgt['t2_pct']}%  → sell all\n"
         f"{tgt['label']}\n"
         f"📰 {cat_label}\n"
         f"{news_line}"
@@ -2130,11 +2187,9 @@ def add_position(uid: str, sym: str, entry: float, qty: int = None):
                 f"📌 <b>Tracking {sym}</b>\n"
                 f"Entry  : ${entry:.2f}\n"
                 f"Stop   : ${tgt2['stop']}  (-{tgt2['stop_pct']}%)\n"
-                f"T1     : ${tgt2['t1']}  (+{tgt2['t1_pct']}%)  → sell 50%\n"
-                f"T2     : ${tgt2['t2']}  (+{tgt2['t2_pct']}%)  → sell rest\n"
                 f"{size_line}"
                 f"{tgt2['label']}\n\n"
-                f"I will alert you when any level is hit."
+                f"I will alert you if the stop or an exit signal is hit."
             )
         except Exception:
             send_to(uid, f"📌 Tracking {sym} at ${entry:.2f}")
@@ -2171,66 +2226,19 @@ def check_portfolio():
                 time.sleep(0.3)
                 continue
 
-            elif not pos["t1_hit"] and price >= pos["t1"]:
-                trail = max(round(entry, 2), round(price * 0.93, 2))  # 7% trail, floor at breakeven
-                send_to(uid,
-                    f"🥇 <b>TARGET 1 HIT — {sym}</b>\n"
-                    f"Price  : ${price:.2f}\n"
-                    f"Entry  : ${entry:.2f}\n"
-                    f"Profit : {pct:+.1f}%\n\n"
-                    f"→ Sell 50%\n"
-                    f"→ Stop now <b>trails 7% below price</b> (at ${trail:.2f}, never below breakeven)"
-                )
-                with _lock:
-                    if uid in portfolio and sym in portfolio[uid]:
-                        portfolio[uid][sym]["t1_hit"] = True
-                        portfolio[uid][sym]["stop"]   = trail
-                save_portfolio()
-
-            elif pos["t1_hit"] and not pos["t2_hit"] and price >= pos["t2"]:
-                send_to(uid,
-                    f"🥈 <b>TARGET 2 HIT — {sym}</b>\n"
-                    f"Price  : ${price:.2f}\n"
-                    f"Entry  : ${entry:.2f}\n"
-                    f"Profit : {pct:+.1f}%\n\n"
-                    f"→ Sell rest — <b>FULL EXIT</b>"
-                )
-                with _lock:
-                    portfolio.get(uid, {}).pop(sym, None)
-                save_portfolio()
-                time.sleep(0.3)
-                continue
-
-            # ── Trailing stop after T1 (7% below price, ratchets up only) ──
-            if pos.get("t1_hit") and not pos.get("t2_hit"):
-                cur_stop = portfolio.get(uid, {}).get(sym, {}).get("stop", pos["stop"])
-                new_stop = max(round(entry, 2), round(price * 0.93, 2))
-                if new_stop > cur_stop + 0.004:
-                    with _lock:
-                        if uid in portfolio and sym in portfolio[uid]:
-                            portfolio[uid][sym]["stop"] = new_stop
-                    save_portfolio()
-                    if new_stop >= cur_stop * 1.02:   # only ping on meaningful raises
-                        send_to(uid,
-                            f"🔒 <b>Trailing stop raised — {sym}</b>\n"
-                            f"Price : ${price:.2f}\n"
-                            f"Stop  : ${cur_stop:.2f} → <b>${new_stop:.2f}</b>  "
-                            f"(locks {((new_stop - entry) / entry * 100):+.1f}%)"
-                        )
-
-            # ── Time-based exit warning: open 2h+ with no Target 1 ──
+            # ── Time-based exit warning: open 2h+ and still flat ──
             opened = pos.get("opened_ts")
             if opened is None:
                 # position predates this feature (loaded from DB) — start its clock now
                 with _lock:
                     if uid in portfolio and sym in portfolio[uid]:
                         portfolio[uid][sym]["opened_ts"] = time.time()
-            elif (not pos.get("t1_hit") and not pos.get("time_warned")
+            elif (not pos.get("time_warned")
                   and time.time() - opened >= 7200):
                 hrs = (time.time() - opened) / 3600
                 send_to(uid,
                     f"⏳ <b>TIME EXIT WARNING — {sym}</b>\n"
-                    f"Open   : {hrs:.1f}h with no Target 1\n"
+                    f"Open   : {hrs:.1f}h, still flat\n"
                     f"Price  : ${price:.2f}  ({pct:+.1f}%)\n\n"
                     f"Scalp rule: if it hasn't run in ~2h, momentum stalled — consider exiting."
                 )
@@ -2291,7 +2299,72 @@ def check_portfolio():
 #  TELEGRAM COMMANDS
 # ═══════════════════════════════════════════════════════════════
 
+TERMS_TEXT = (
+    "⚠️ <b>RISK DISCLAIMER</b>\n\n"
+    "This bot is for educational and informational purposes only and is "
+    "<b>NOT financial advice</b>. All trades are your own decision and at your own risk.\n\n"
+    "The bot and its operator are <b>NOT responsible for any losses and do not "
+    "bear them</b>. Alerts — especially ⚡ HIGH-RISK MOMENTUM — are highly volatile "
+    "and can fall sharply within minutes.\n\n"
+    "Never invest money you cannot afford to lose. Always use a stop loss. "
+    "By using this bot you accept full responsibility for your own trades.\n\n"
+    "━━━━━━━━━━━━━━━━━━━━\n"
+    "⚠️ <b>إخلاء المسؤولية</b>\n\n"
+    "هذا البوت لأغراض تعليمية ومعلوماتية فقط وليس نصيحة مالية. "
+    "جميع الصفقات قرارك وعلى مسؤوليتك الخاصة.\n\n"
+    "البوت ومشغّله <b>غير مسؤولين عن أي خسائر ولا يتحمّلونها</b>. "
+    "التنبيهات — خاصة ⚡ الزخم عالي المخاطر — متقلبة جدًا وقد تنخفض بسرعة.\n\n"
+    "لا تستثمر أموالًا لا تستطيع تحمّل خسارتها. استخدم دائمًا وقف الخسارة. "
+    "باستخدامك هذا البوت فإنك تتحمل كامل المسؤولية عن صفقاتك.\n\n"
+    "✅ Reply /accept to agree  ·  أرسل /accept للموافقة"
+)
+
+GUIDE_TEXT = (
+    "📘 <b>How to Use / كيفية الاستخدام</b>\n\n"
+    "<b>📊 Grades / التقييمات</b>\n"
+    "🅰️ A = strong setup — best trades\n"
+    "🅱️ B = good setup\n"
+    "⚠️ C = weak — not alerted\n"
+    "⚡ HIGH-RISK MOMENTUM = big runner, unverified pump — risky, trade small\n\n"
+    "<b>💼 Position commands / أوامر الصفقات</b>\n"
+    "<code>BUY NNVC 1.75</code>       → track a new buy (shares optional)\n"
+    "<code>BUY NNVC 1.75 100</code>   → buy with shares\n"
+    "<code>ADD NNVC 1.80 100</code>   → average in a second buy\n"
+    "<code>SELL NNVC</code>           → stop tracking\n"
+    "<code>SELL NNVC 2.10 100</code>  → stop + log P&amp;L\n"
+    "<code>EDIT BUY NNVC 1.70</code>  → fix a wrong buy price\n"
+    "<code>EDIT SELL NNVC 2.10</code> → fix last sell price\n"
+    "<code>UNDO</code>                → restore last sold position\n\n"
+    "The bot alerts you on stop-loss and exit signals.\n"
+    "ينبّهك البوت عند وقف الخسارة وإشارات الخروج."
+)
+
+ACCEPT_PROMPT = (
+    "⚠️ <b>Before you start</b>\n\n"
+    "Please read the risk disclaimer:  /terms\n"
+    "Then reply <b>/accept</b> to confirm you understand and agree.\n\n"
+    "⚠️ <b>قبل البدء</b>\n"
+    "يرجى قراءة إخلاء المسؤولية:  /terms\n"
+    "ثم أرسل <b>/accept</b> للموافقة والمتابعة."
+)
+
+
+def _account_box(uid: str) -> str:
+    u     = users.get(uid, {})
+    name  = u.get("name") or uid
+    uname = u.get("username")
+    login = f"{name}  (or @{uname})" if uname else name
+    pin   = db_get_pin(uid) if DB_OK else "1234"
+    return (
+        f"👤 <b>Your account</b>\n"
+        f"Name  : {name}\n"
+        f"Login : {login}\n"
+        f"PIN   : {pin}\n"
+    )
+
+
 def handle_command(uid: str, text: str, sender_name: str = "", sender_username: str = ""):
+    global MOMENTUM_ALERTS
     uid = str(uid)
     cmd = text.strip().lower()
 
@@ -2305,6 +2378,27 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
         )
         send_to(uid, "⏳ Access request sent to admin.\nYou will be notified once approved.")
         return
+
+    # ── Disclaimer acceptance gate (one-time; admins exempt) ──
+    if not is_admin(uid) and not users.get(uid, {}).get("accepted"):
+        base = cmd.split()[0] if cmd else ""
+        if base == "/accept":
+            with _lock:
+                if uid in users:
+                    users[uid]["accepted"]    = True
+                    users[uid]["accepted_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            save_users()
+            send_to(uid,
+                "✅ <b>Thank you — terms accepted.</b>\nأهلًا بك! تم قبول الشروط.\n\n"
+                + _account_box(uid)
+                + "\n📘 /guide — commands &amp; grades\n📖 /help — all commands",
+                reply_markup=dash_button(),
+            )
+            return
+        if base not in ("/terms", "/disclaimer", "/guide"):
+            send_to(uid, ACCEPT_PROMPT)
+            return
+        # /terms and /guide are allowed before accepting — fall through
 
     if cmd.startswith("/adduser"):
         if not is_admin(uid):
@@ -2320,13 +2414,8 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
                 db_set_pin(target, "1234")
             send_to(uid,    f"✅ User {target} added.")
             send_to(target,
-                "✅ <b>Access granted!</b>\n\n"
-                "Send /help to see available commands.\n\n"
-                "📊 <b>Dashboard access:</b>\n"
-                "User: your Telegram name\n"
-                "PIN : 1234  (change with /setpin XXXX)\n\n"
-                "Tap the button below to open the dashboard.",
-                reply_markup=dash_button(),
+                "✅ <b>Access granted!</b>  ·  تم منح الوصول\n\n"
+                + ACCEPT_PROMPT
             )
         else:
             send_to(uid, f"✅ User {target} re-activated.")
@@ -2433,7 +2522,24 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
             f"  RSI     : &lt;{f['max_rsi']} (parabolic block)\n\n"
             f"Your positions  : {n_pos}\n"
             f"Stocks alerted  : {n_alert}\n"
+            f"Momentum chan.  : {'⚡ ON' if MOMENTUM_ALERTS else 'OFF'}\n"
             f"Active users    : {n_users}"
+        )
+
+    elif cmd.startswith("/momentum"):
+        if not is_admin(uid):
+            send_to(uid, "❌ Admin only command.")
+            return
+        parts = text.strip().split()
+        if len(parts) >= 2 and parts[1].lower() in ("on", "off"):
+            MOMENTUM_ALERTS = (parts[1].lower() == "on")
+        else:
+            MOMENTUM_ALERTS = not MOMENTUM_ALERTS
+        send_to(uid,
+            f"⚡ <b>High-risk momentum channel: {'ON' if MOMENTUM_ALERTS else 'OFF'}</b>\n\n"
+            + ("Big runners the strict filter rejects (unverified pumps) will be sent — clearly labeled as risky."
+               if MOMENTUM_ALERTS else "Only strict Grade A/B alerts will be sent.")
+            + "\n\nToggle: /momentum on  |  /momentum off"
         )
 
     elif cmd == "/watchlist":
@@ -2469,10 +2575,9 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
                         pl   = f"  {icon} {pct:+.1f}%  now ${price:.2f}"
                     else:
                         pl = ""
-                    t1_tag = "✅" if p.get("t1_hit") else "○"
                     lines.append(
                         f"<b>{sym}</b>  entry:${entry:.2f}{pl}\n"
-                        f"  Stop:${p['stop']:.2f}  T1:{t1_tag}${p['t1']:.2f}  T2:${p['t2']:.2f}"
+                        f"  Stop:${p['stop']:.2f}"
                     )
                 send_to(uid, "\n\n".join(lines))
             threading.Thread(target=_pf, daemon=True).start()
@@ -2527,7 +2632,7 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
                         f"📊 <b>{sym_a}</b> averaged\n"
                         f"${old_entry:.2f} + ${new_price:.2f}  →  avg <b>${avg:.2f}</b>"
                         + (f"  ×{total_qty}" if total_qty else "") + "\n"
-                        f"Stop ${tgt['stop']}   T1 ${tgt['t1']}   T2 ${tgt['t2']}"
+                        f"Stop ${tgt['stop']}"
                     )
             except ValueError:
                 send_to(uid, "❌ Format: ADD SYMBOL PRICE [SHARES]\nExample: ADD AUUD 1.75 100")
@@ -2634,7 +2739,7 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
                         send_to(uid,
                             f"✅ <b>{sym_e}</b> entry corrected\n"
                             f"${old_entry:.2f}  →  ${new_price:.2f}{qty_str}\n"
-                            f"Stop ${tgt['stop']}   T1 ${tgt['t1']}   T2 ${tgt['t2']}"
+                            f"Stop ${tgt['stop']}"
                         )
                     else:
                         # Closed trade — update last trade record in DB
@@ -2678,8 +2783,7 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
                 db_save_position(uid, sym_u, pos_u)
             send_to(uid,
                 f"↩️ <b>{sym_u}</b> restored to portfolio\n"
-                f"Entry ${pos_u['entry']:.2f}   Stop ${pos_u['stop']:.2f}   "
-                f"T1 ${pos_u['t1']:.2f}   T2 ${pos_u['t2']:.2f}"
+                f"Entry ${pos_u['entry']:.2f}   Stop ${pos_u['stop']:.2f}"
             )
 
     elif cmd.startswith("/setpin"):
@@ -2736,41 +2840,39 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
                 "To activate Claude: add credits at console.anthropic.com"
             )
 
+    elif cmd in ("/terms", "/disclaimer"):
+        send_to(uid, TERMS_TEXT)
+
+    elif cmd == "/guide":
+        send_to(uid, GUIDE_TEXT)
+
+    elif cmd == "/accept":
+        send_to(uid, "✅ You have already accepted the terms.\nتم قبول الشروط مسبقًا.")
+
     elif cmd in ("/help", "/start"):
         admin_section = (
-            "\n\n<b>Admin commands (you only):</b>\n"
+            "\n\n<b>Admin (you only):</b>\n"
             "/adduser 123456789    → approve user\n"
             "/removeuser 123456789 → remove user\n"
-            "/users                → list all users"
+            "/users                → list all users\n"
+            "/momentum on|off      → toggle momentum channel"
         ) if is_admin(uid) else ""
         send_to(uid,
             "📖 <b>Commands</b>\n\n"
-            "/check NNVC   → full analysis on any stock\n"
-            "/scan         → trigger scan now\n"
+            + _account_box(uid) + "\n"
+            "/check NNVC   → full analysis on a stock\n"
+            "/scan         → scan now\n"
             "/status       → session & filter info\n"
-            "/claude       → Claude AI status\n"
             "/watchlist    → last 10 alerts\n"
-            "/portfolio    → your tracked positions\n"
-            "/track NNVC   → always scan this symbol every cycle\n"
-            "/untrack NNVC → remove from tracked list\n"
-            "/setpin 1234  → change your dashboard PIN\n\n"
-            "<b>Position tracking:</b>\n"
-            "BUY NNVC 1.75        → new buy (shares optional)\n"
-            "BUY NNVC 1.75 100   → new buy with shares\n"
-            "ADD NNVC 1.80 100    → second buy (averages entry)\n"
-            "SELL NNVC            → stop tracking\n"
-            "SELL NNVC 2.10 100   → stop + log P&L\n\n"
-            "<b>Fix mistakes:</b>\n"
-            "EDIT BUY NNVC 1.70        → correct wrong buy price\n"
-            "EDIT BUY NNVC 1.70 100    → correct buy price + shares\n"
-            "EDIT SELL NNVC 2.10       → correct last sell price\n"
-            "EDIT SELL NNVC 2.10 100   → correct sell price + shares\n"
-            "UNDO                      → restore last sold position\n\n"
-            "<b>Grades:</b>\n"
-            "🅰️ A = strong setup — best trades\n"
-            "🅱️ B = good setup\n"
-            "⚠️ C = weak — not alerted\n\n"
-            "🌐 <b>Dashboard</b> — tap the button below to open it"
+            "/portfolio    → your positions\n"
+            "/track NNVC   → always scan a symbol\n"
+            "/untrack NNVC → remove from tracked\n"
+            "/setpin 1234  → change your dashboard PIN\n"
+            "/claude       → Claude AI status\n\n"
+            "📘 /guide  → buy/sell commands &amp; grades\n"
+            "⚠️ /terms  → risk disclaimer\n\n"
+            "<i>The bot is NOT responsible for any losses. See /terms.</i>\n"
+            "🌐 Dashboard — tap the button below"
             + admin_section,
             reply_markup=dash_button(),
         )
@@ -2802,15 +2904,24 @@ def telegram_listener():
                     log.info(f"[Telegram] {uid} ({username or name}): {text}")
                     with _lock:
                         if uid in users and (name or username):
-                            stored = users[uid]
-                            real_name = name or username or uid
-                            if stored.get("name") == uid or not stored.get("name"):
-                                stored["name"] = real_name
-                            if username:
+                            stored  = users[uid]
+                            changed = False
+                            # Always refresh to the latest real Telegram name so
+                            # /users shows names, not numeric IDs.
+                            if name and stored.get("name") != name:
+                                stored["name"] = name
+                                changed = True
+                            elif not stored.get("name") or stored.get("name") == uid:
+                                stored["name"] = username or uid
+                                changed = True
+                            if username and stored.get("username") != username:
                                 stored["username"] = username
-                            if DB_OK:
-                                db_upsert_user(uid, stored["name"], username,
-                                                  stored["active"], stored.get("is_admin", False))
+                                changed = True
+                            if changed:
+                                save_users()
+                                if DB_OK:
+                                    db_upsert_user(uid, stored["name"], username,
+                                                      stored["active"], stored.get("is_admin", False))
                     cmd_pool.submit(_dispatch, uid, text, name, username)
         except Exception as e:
             log.warning(f"[Listener error] {e}")
@@ -2900,6 +3011,35 @@ def passes_filters(stock: dict, fv: dict, f: dict) -> tuple:
         return False, ai_reason
     return True, ""
 
+def is_high_risk_momentum(stock: dict, fv: dict, f: dict) -> bool:
+    """A stock the STRICT filter rejected, but that's still a real, tradeable
+    runner — big move + genuine liquidity you can actually exit. These are the
+    'unverified pump' rejects (weak/no catalyst, micro-float, near peak, faded
+    off high) — NOT junk (thin liquidity, dying volume, out of range, nano-cap).
+    Fires the separate high-risk channel; never the main strict alerts."""
+    p   = fv.get("price") or stock["price"]
+    chg = stock["change"]
+    vol = fv.get("volume") or stock["volume"]
+    rsi = fv.get("rsi")
+    mc  = fv.get("mcap_m")
+    mfi = fv.get("mfi")
+    h   = fv.get("high")
+
+    if not (MIN_PRICE <= p <= MAX_PRICE):                return False
+    if chg < f["min_change"]:                            return False
+    # Hard liquidity floor — money you can actually get back out of
+    dollar_vol = (p or 0) * (vol or 0)
+    if vol and dollar_vol < f.get("min_dollar_vol", 0): return False
+    # Not actively dumping / momentum already dead
+    if rsi is not None and rsi < 45:                     return False
+    if mfi and mfi >= 90 and (rsi is None or rsi > 75):  return False
+    if mc and mc < 1:                                    return False
+    # Already fully collapsed off the high — past momentum, not a play anymore
+    if h and h > 0 and p < h * MOMENTUM_MIN_FROM_HIGH:   return False
+    # Quality floor — must not be bottom-tier on every dimension
+    if compute_grade(stock, fv) == "C":                 return False
+    return True
+
 def _process_stock(stock: dict, f: dict):
     sym     = stock["symbol"]
     session = get_session() or "UNK"
@@ -2908,15 +3048,24 @@ def _process_stock(stock: dict, f: dict):
         return None
     grade = compute_grade(stock, fv)
     passed, reason = passes_filters(stock, fv, f)
-    if not passed:
-        log.info(f"  Skip {sym:6s}  ${stock['price']:.2f}  {stock['change']:+.0f}%  "
-                 f"RSI={fv.get('rsi','?')}  Float={fv.get('float_m','?')}M  Grade={grade}  [{reason}]")
+    if passed:
         if DB_OK:
-            db_log_scan(sym, stock["price"], stock["change"], grade, False, reason, session)
-        return None
+            db_log_scan(sym, fv.get("price") or stock["price"], stock["change"], grade, True, "", session)
+        return (stock, fv, grade, "alert", "")
+    # Strict filter rejected — but is it still a tradeable high-risk runner?
+    if MOMENTUM_ALERTS and is_high_risk_momentum(stock, fv, f):
+        log.info(f"  ⚡Momo {sym:6s}  ${stock['price']:.2f}  {stock['change']:+.0f}%  "
+                 f"RSI={fv.get('rsi','?')}  Float={fv.get('float_m','?')}M  Grade={grade}  "
+                 f"[high-risk; strict reject: {reason}]")
+        if DB_OK:
+            db_log_scan(sym, fv.get("price") or stock["price"], stock["change"], grade,
+                        False, f"MOMENTUM: {reason}", session)
+        return (stock, fv, grade, "momentum", reason)
+    log.info(f"  Skip {sym:6s}  ${stock['price']:.2f}  {stock['change']:+.0f}%  "
+             f"RSI={fv.get('rsi','?')}  Float={fv.get('float_m','?')}M  Grade={grade}  [{reason}]")
     if DB_OK:
-        db_log_scan(sym, fv.get("price") or stock["price"], stock["change"], grade, True, "", session)
-    return (stock, fv, grade)
+        db_log_scan(sym, stock["price"], stock["change"], grade, False, reason, session)
+    return None
 
 def run_scan(requester_id=None):
     def _reply(msg):
@@ -2984,11 +3133,15 @@ def run_scan(requester_id=None):
             if r:
                 results.append(r)
 
+    # Split the two channels: strict Grade alerts vs high-risk momentum
+    alerts   = [r for r in results if r[3] == "alert"]
+    momentum = [r for r in results if r[3] == "momentum"]
+
     # A grades first
-    results.sort(key=lambda x: x[2])
+    alerts.sort(key=lambda x: x[2])
 
     sent = 0
-    for stock, fv, grade in results:
+    for stock, fv, grade, _tier, _reason in alerts:
         sym = stock["symbol"]
         with _lock:
             if (time.time() - alerted.get(sym, 0)) < ALERT_COOLDOWN:
@@ -3071,6 +3224,22 @@ def run_scan(requester_id=None):
 
         time.sleep(0.5)
 
+    # ── High-risk momentum channel — big runners the strict filter rejected ──
+    momo_sent = 0
+    for stock, fv, grade, _tier, reason in momentum:
+        sym = stock["symbol"]
+        with _lock:
+            if (time.time() - momentum_alerted.get(sym, 0)) < ALERT_COOLDOWN:
+                continue
+            if (time.time() - alerted.get(sym, 0)) < ALERT_COOLDOWN:
+                continue
+        broadcast(build_momentum_alert(stock, fv, session, reason))
+        with _lock:
+            momentum_alerted[sym] = time.time()
+        momo_sent += 1
+        log.info(f"  ⚡Momentum → {sym}  ${stock['price']:.2f}  ({stock['change']:+.1f}%)  Grade={grade}")
+        time.sleep(0.5)
+
     # ── Tracked symbols — always scan regardless of gainers list ──
     with _lock:
         tracked = set(tracked_symbols)
@@ -3097,8 +3266,11 @@ def run_scan(requester_id=None):
     check_portfolio()
 
     if sent == 0:
-        log.info("  No A/B grade matches")
-        _reply("🔍 Scan done — no Grade A/B stocks right now. Filters are working but nothing qualifies yet.")
+        log.info(f"  No A/B grade matches  ({momo_sent} high-risk momentum sent)")
+        if momo_sent:
+            _reply(f"🔍 Scan done — no Grade A/B stocks, but {momo_sent} high-risk momentum runner(s) sent. ⚡")
+        else:
+            _reply("🔍 Scan done — no Grade A/B stocks right now. Filters are working but nothing qualifies yet.")
 
 
 def reset_stale_cooldowns():
@@ -3175,8 +3347,9 @@ def reset_daily():
     with _lock:
         count = len(watchlist_log)
         watchlist_log.clear()
+        momentum_alerted.clear()
     save_watchlist()
-    log.info(f"[Daily Reset] watchlist_log cleared ({count} entries) — fresh start for today")
+    log.info(f"[Daily Reset] watchlist_log + momentum cooldowns cleared ({count} entries) — fresh start for today")
 
 
 def check_alert_performance():
@@ -3228,8 +3401,9 @@ def check_alert_performance():
         for r in failed:
             lines.append(f"  <b>{r['sym']}</b> [{r['grade']}]  ${r['alert']:.2f} → ${r['close']:.2f}  ({r['pct']:+.1f}%)")
 
-    broadcast("\n".join(lines))
-    log.info(f"[Performance] Report sent — {len(passed)}/{len(results)} passed ({win_rate}%)")
+    # Daily report is no longer sent to anyone — outcomes are still recorded
+    # above so the dashboard win-rate keeps working.
+    log.info(f"[Performance] Outcomes recorded — {len(passed)}/{len(results)} passed ({win_rate}%) (no broadcast)")
 
 
 def main():
