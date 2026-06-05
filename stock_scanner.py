@@ -61,9 +61,9 @@ FLOAT_CACHE_TTL = 86_400  # float doesn't change daily — cache 24 h
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")  # add credits at console.anthropic.com then paste key
 
 FILTERS = {
-    "PRE":   {"min_change": 10.0, "min_volume": 10_000,  "max_float_m": 25.0, "max_rsi": 90.0, "max_mcap_m": 300.0},
-    "OPEN":  {"min_change": 15.0, "min_volume": 500_000, "max_float_m": 20.0, "max_rsi": 90.0, "max_mcap_m": 300.0},
-    "AFTER": {"min_change": 10.0, "min_volume": 50_000,  "max_float_m": 20.0, "max_rsi": 85.0, "max_mcap_m": 300.0},
+    "PRE":   {"min_change": 10.0, "min_volume": 10_000,  "min_dollar_vol": 300_000,   "max_float_m": 25.0, "max_rsi": 90.0, "max_mcap_m": 300.0},
+    "OPEN":  {"min_change": 15.0, "min_volume": 500_000, "min_dollar_vol": 2_000_000, "max_float_m": 20.0, "max_rsi": 90.0, "max_mcap_m": 300.0},
+    "AFTER": {"min_change": 10.0, "min_volume": 50_000,  "min_dollar_vol": 500_000,   "max_float_m": 20.0, "max_rsi": 85.0, "max_mcap_m": 300.0},
 }
 
 URLS = {
@@ -2224,6 +2224,13 @@ def passes_filters(stock: dict, fv: dict, f: dict) -> tuple:
     if chg < f["min_change"]:             return False, f"change {chg:.0f}% < {f['min_change']:.0f}%"
     if vol and vol < f["min_volume"] and not (rv and rv > 15):
                                           return False, f"vol {vol:,} < {f['min_volume']:,}"
+    # Hard liquidity floor — absolute $-volume (price x shares). Cannot be
+    # bypassed by high rel-volume: a tiny-float stock always shows huge rel-vol
+    # while barely any money trades, so you get stuck with no buyers on exit.
+    dollar_vol = (p or 0) * (vol or 0)
+    if vol and dollar_vol < f.get("min_dollar_vol", 0):
+                                          return False, (f"thin liquidity ${dollar_vol/1e6:.2f}M $-vol "
+                                                         f"< ${f['min_dollar_vol']/1e6:.1f}M — no buyers to exit safely")
     if rsi is None:
         if cat_pts < 2:                   return False, "RSI unknown — no strong catalyst to verify momentum"
     if rsi and rsi > f["max_rsi"]:        return False, f"RSI {rsi:.0f} > {f['max_rsi']:.0f} — parabolic"
