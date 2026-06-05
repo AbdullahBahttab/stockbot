@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+
+# Local data files
+*.json
+*.db
+*.log
+*.bat
+
+# Windows/IDE
+.env
+*.sql

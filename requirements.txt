@@ -1,0 +1,8 @@
+requests
+beautifulsoup4
+schedule
+pytz
+anthropic
+dash
+pandas
+plotly
