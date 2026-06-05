@@ -1,9 +1,10 @@
 #!/bin/bash
-# Railway startup: use SQLite db, init tables, then run bot
+# Railway startup: use SQLite db, init tables, run bot + dashboard
 set -e
 
-# Use the Linux/SQLite db module
+# Use the Linux/SQLite modules
 cp linux/db.py db.py
+cp linux/dashboard.py dashboard.py
 
 # Create tables (idempotent — safe every startup)
 python - <<'PYEOF'
@@ -91,5 +92,8 @@ conn.close()
 print("DB ready:", DB_PATH)
 PYEOF
 
-# Start the bot
+# Start dashboard in background (Railway exposes it via PORT)
+python dashboard.py &
+
+# Start the bot (foreground — keeps the process alive)
 exec python stock_scanner.py
