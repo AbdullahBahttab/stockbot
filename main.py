@@ -593,6 +593,8 @@ if hasattr(sys.stderr, "reconfigure"):
 # ═══════════════════════════════════════════════════════════════
 BOT_TOKEN      = os.environ.get("BOT_TOKEN", "")
 ADMIN_ID       = "179463282"
+DASHBOARD_URL  = os.environ.get(
+    "DASHBOARD_URL", "https://worker-production-5710.up.railway.app/overview")
 USERS_FILE     = os.path.join(BASE_DIR, "bot_users.json")
 PORTFOLIO_FILE = os.path.join(BASE_DIR, "portfolio.json")
 WATCHLIST_FILE = os.path.join(BASE_DIR, "watchlist.json")
@@ -1087,14 +1089,17 @@ def get_active_users() -> list[str]:
 #  TELEGRAM
 # ═══════════════════════════════════════════════════════════════
 
-def send_to(uid: str, text: str) -> bool:
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+def dash_button():
+    """Inline keyboard with a tap-to-open Dashboard link button."""
+    return {"inline_keyboard": [[{"text": "📊 Open Dashboard", "url": DASHBOARD_URL}]]}
+
+def send_to(uid: str, text: str, reply_markup=None) -> bool:
+    url  = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    data = {"chat_id": str(uid), "text": text, "parse_mode": "HTML"}
+    if reply_markup is not None:
+        data["reply_markup"] = json.dumps(reply_markup)
     try:
-        r = requests.post(
-            url,
-            data={"chat_id": str(uid), "text": text, "parse_mode": "HTML"},
-            timeout=10,
-        )
+        r = requests.post(url, data=data, timeout=10)
         return r.status_code == 200
     except Exception as e:
         log.warning(f"send_to({uid}) failed: {e}")
@@ -2318,9 +2323,10 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
                 "✅ <b>Access granted!</b>\n\n"
                 "Send /help to see available commands.\n\n"
                 "📊 <b>Dashboard access:</b>\n"
-                "URL : http://localhost:8050\n"
                 "User: your Telegram name\n"
-                "PIN : 1234  (change with /setpin XXXX)"
+                "PIN : 1234  (change with /setpin XXXX)\n\n"
+                "Tap the button below to open the dashboard.",
+                reply_markup=dash_button(),
             )
         else:
             send_to(uid, f"✅ User {target} re-activated.")
@@ -2687,8 +2693,9 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
             send_to(uid,
                 f"✅ <b>PIN updated!</b>\n\n"
                 f"Your new dashboard PIN: <b>{new_pin}</b>\n\n"
-                f"Login at: http://localhost:8050\n"
-                f"Username: your Telegram name"
+                f"Username: your Telegram name\n\n"
+                f"Tap the button below to open the dashboard.",
+                reply_markup=dash_button(),
             )
         else:
             send_to(uid, "❌ Database not connected. PIN not saved.")
@@ -2762,8 +2769,10 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
             "<b>Grades:</b>\n"
             "🅰️ A = strong setup — best trades\n"
             "🅱️ B = good setup\n"
-            "⚠️ C = weak — not alerted"
-            + admin_section
+            "⚠️ C = weak — not alerted\n\n"
+            "🌐 <b>Dashboard</b> — tap the button below to open it"
+            + admin_section,
+            reply_markup=dash_button(),
         )
 
 
@@ -4320,6 +4329,7 @@ PAGE_MAP = {
 app = Dash(
     __name__, title="StockBot",
     suppress_callback_exceptions=True,
+    update_title=None,            # no "Updating..." title flicker on every callback
     external_stylesheets=[
         "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap",
         "https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800&display=swap",
@@ -4334,6 +4344,14 @@ app = Dash(
     ],
 )
 server = app.server  # exposed for gunicorn / WSGI if needed
+
+# Speed: gzip every response (shrinks the multi-MB Plotly/JS bundles ~70%).
+# No-op if flask-compress isn't installed, so local runs never break.
+try:
+    from flask_compress import Compress
+    Compress(server)
+except Exception as _e:
+    pass
 
 # Responsive + RTL overrides. Inline styles outrank stylesheet rules, so the
 # mobile media queries use !important to override layout only on small screens —
@@ -4643,9 +4661,11 @@ def update_trades_content(filter_type, sel_day, sel_month, auth, lang, theme):
     Input("auth",  "data"),
     Input("lang",  "data"),
     Input("theme", "data"),
-    Input("tick",  "n_intervals"),
+    # NOTE: no "tick" here on purpose — the 30s timer used to rebuild the whole
+    # page every cycle, making all charts flicker (disappear/redraw). Pages now
+    # render only on navigation / login / language / theme change.
 )
-def route(pathname, auth, lang, theme, _):
+def route(pathname, auth, lang, theme):
     if not auth or not auth.get("chat_id"):
         return _SHOW_LOGIN, _HIDE, [], "", "", "", ""
     lang = lang if lang in TR else "en"
