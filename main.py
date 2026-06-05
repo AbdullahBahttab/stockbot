@@ -1566,6 +1566,7 @@ def fetch_webull(symbol: str) -> dict | None:
                 "float_estimated": float_estimated,
                 "change_pct": change_pct,
                 "mfi": mfi, "obv_trend": obv_trend,
+                "prev_close": sf(q.get("preClose")),   # yesterday's close — for gap %
             }
         except Exception:
             return None
@@ -1732,6 +1733,7 @@ def fetch_stock_data(symbol: str) -> dict | None:
         if webull.get("float_m"):     data["float_m"] = webull["float_m"]
         if webull.get("news"):        data["news"]    = webull["news"]
         if webull.get("vwap"):        data["vwap"]    = webull["vwap"]
+        if webull.get("prev_close"):  data["prev_close"] = webull["prev_close"]
 
     # Yahoo float fills gap when Webull fundamentals (417) and Finviz both fail
     if not data.get("float_m") and yf_float:
@@ -2006,6 +2008,15 @@ def range_bar(price, high, low) -> str:
     label = "🟢 Low (good entry)" if pos < 35 else ("🟡 Mid" if pos < 70 else "🔴 High — wait for dip")
     return f"{pos:.0f}%  {label}"
 
+def gap_line(price, fv) -> str:
+    """One-line gap from yesterday's close, or '' when prev close is unknown."""
+    pc = fv.get("prev_close")
+    if not pc or pc <= 0:
+        return ""
+    g     = (price - pc) / pc * 100
+    arrow = "⬆️" if g >= 0 else "⬇️"
+    return f"Gap      {g:+.1f}% {arrow}  (prev close ${pc:.2f})\n"
+
 def build_alert_simple(stock: dict, fv: dict, session: str) -> str:
     """Short alert for auto-scan broadcasts — entry & stop, no indicators."""
     sym    = stock["symbol"]
@@ -2022,6 +2033,7 @@ def build_alert_simple(stock: dict, fv: dict, session: str) -> str:
     news_line = f"<i>{news[:120]}</i>\n" if news and news != "—" else ""
     return (
         f"{grade_icon} <b>{sym}</b>   ${price:.2f}   {change:+.1f}%\n"
+        f"{gap_line(price, fv)}"
         f"Entry    ${entry_lo} – ${entry_hi}\n"
         f"Stop     ${tgt['stop']}   -{tgt['stop_pct']}%\n"
         f"{tgt['label']}\n"
@@ -2050,6 +2062,7 @@ def build_alert(stock: dict, fv: dict, session: str) -> str:
 
     return (
         f"{grade_icon} <b>{sym}</b>   ${price:.2f}   {change:+.1f}%\n"
+        f"{gap_line(price, fv)}"
         f"Entry    ${entry_lo} – ${entry_hi}\n"
         f"Stop     ${tgt['stop']}   -{tgt['stop_pct']}%\n"
         f"T1       ${tgt['t1']}   +{tgt['t1_pct']}%  → sell 50%\n"
@@ -2080,6 +2093,8 @@ def add_position(uid: str, sym: str, entry: float, qty: int = None):
         "vol_warned":  False,
         "exit_warned": False,
         "qty":         qty,
+        "opened_ts":   time.time(),   # for time-based exit warning
+        "time_warned": False,
     }
     with _lock:
         portfolio.setdefault(uid, {})[sym] = pos
@@ -2152,17 +2167,19 @@ def check_portfolio():
                 continue
 
             elif not pos["t1_hit"] and price >= pos["t1"]:
+                trail = max(round(entry, 2), round(price * 0.93, 2))  # 7% trail, floor at breakeven
                 send_to(uid,
                     f"🥇 <b>TARGET 1 HIT — {sym}</b>\n"
                     f"Price  : ${price:.2f}\n"
                     f"Entry  : ${entry:.2f}\n"
                     f"Profit : {pct:+.1f}%\n\n"
-                    f"→ Sell 50%\n→ Move stop to ${entry:.2f} (breakeven)"
+                    f"→ Sell 50%\n"
+                    f"→ Stop now <b>trails 7% below price</b> (at ${trail:.2f}, never below breakeven)"
                 )
                 with _lock:
                     if uid in portfolio and sym in portfolio[uid]:
                         portfolio[uid][sym]["t1_hit"] = True
-                        portfolio[uid][sym]["stop"]   = entry
+                        portfolio[uid][sym]["stop"]   = trail
                 save_portfolio()
 
             elif pos["t1_hit"] and not pos["t2_hit"] and price >= pos["t2"]:
@@ -2178,6 +2195,43 @@ def check_portfolio():
                 save_portfolio()
                 time.sleep(0.3)
                 continue
+
+            # ── Trailing stop after T1 (7% below price, ratchets up only) ──
+            if pos.get("t1_hit") and not pos.get("t2_hit"):
+                cur_stop = portfolio.get(uid, {}).get(sym, {}).get("stop", pos["stop"])
+                new_stop = max(round(entry, 2), round(price * 0.93, 2))
+                if new_stop > cur_stop + 0.004:
+                    with _lock:
+                        if uid in portfolio and sym in portfolio[uid]:
+                            portfolio[uid][sym]["stop"] = new_stop
+                    save_portfolio()
+                    if new_stop >= cur_stop * 1.02:   # only ping on meaningful raises
+                        send_to(uid,
+                            f"🔒 <b>Trailing stop raised — {sym}</b>\n"
+                            f"Price : ${price:.2f}\n"
+                            f"Stop  : ${cur_stop:.2f} → <b>${new_stop:.2f}</b>  "
+                            f"(locks {((new_stop - entry) / entry * 100):+.1f}%)"
+                        )
+
+            # ── Time-based exit warning: open 2h+ with no Target 1 ──
+            opened = pos.get("opened_ts")
+            if opened is None:
+                # position predates this feature (loaded from DB) — start its clock now
+                with _lock:
+                    if uid in portfolio and sym in portfolio[uid]:
+                        portfolio[uid][sym]["opened_ts"] = time.time()
+            elif (not pos.get("t1_hit") and not pos.get("time_warned")
+                  and time.time() - opened >= 7200):
+                hrs = (time.time() - opened) / 3600
+                send_to(uid,
+                    f"⏳ <b>TIME EXIT WARNING — {sym}</b>\n"
+                    f"Open   : {hrs:.1f}h with no Target 1\n"
+                    f"Price  : ${price:.2f}  ({pct:+.1f}%)\n\n"
+                    f"Scalp rule: if it hasn't run in ~2h, momentum stalled — consider exiting."
+                )
+                with _lock:
+                    if uid in portfolio and sym in portfolio[uid]:
+                        portfolio[uid][sym]["time_warned"] = True
 
             # ── RSI / Volume exit signals ─────────────────────
             rsi_danger = rsi is not None and rsi > 75
@@ -2938,19 +2992,29 @@ def run_scan(requester_id=None):
             obv_fresh = fv.get("obv_trend") == "↑"
             mfi       = fv.get("mfi")
             mfi_ok    = mfi is None or mfi < 75
+            rv_now    = fv.get("rel_vol")
+            rv_prev   = prev.get("rel_vol")
+            # Second wave: a genuine fresh volume surge vs the prior alert.
+            # (These already passed the liquidity floor, so it can't re-open thin names.)
+            second_wave = (rv_now is not None and rv_now >= 5
+                           and (rv_prev is None or rv_now >= rv_prev * 1.5))
             if 0.85 <= ratio <= 1.50:
-                if obv_fresh and mfi_ok:
+                if (obv_fresh or second_wave) and mfi_ok:
                     mfi_s = f"{mfi:.0f}" if mfi else "N/A"
-                    log.info(f"  Allow {sym} re-alert — OBV↑ + MFI={mfi_s} → fresh new leg vs prev ${prev['price']:.2f}")
+                    why   = (f"2nd-wave RelVol {rv_now:.0f}x"
+                             if second_wave and not obv_fresh else f"OBV↑ + MFI={mfi_s}")
+                    log.info(f"  Allow {sym} re-alert — {why} → fresh new leg vs prev ${prev['price']:.2f}")
                 else:
-                    log.info(f"  Skip {sym} re-alert — no fresh money flow (OBV={fv.get('obv_trend')}, MFI={mfi}) vs prev ${prev['price']:.2f}")
+                    log.info(f"  Skip {sym} re-alert — no fresh money flow "
+                             f"(OBV={fv.get('obv_trend')}, MFI={mfi}, RelVol={rv_now}) vs prev ${prev['price']:.2f}")
                     continue
         broadcast(build_alert_simple(stock, fv, session))
         with _lock:
             alerted[sym] = time.time()
             watchlist_log.append({
                 "sym": sym, "price": stock["price"], "change": stock["change"],
-                "grade": grade, "time": datetime.now(EASTERN).strftime("%H:%M"),
+                "grade": grade, "rel_vol": fv.get("rel_vol"),
+                "time": datetime.now(EASTERN).strftime("%H:%M"),
             })
         save_watchlist()
         save_alerted()
