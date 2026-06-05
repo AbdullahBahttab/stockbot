@@ -1548,8 +1548,6 @@ def build_alert(stock: dict, fv: dict, session: str) -> str:
         f"{grade_icon} <b>{sym}</b>   ${price:.2f}   {change:+.1f}%\n"
         f"Entry    ${entry_lo} – ${entry_hi}\n"
         f"Stop     ${tgt['stop']}   -{tgt['stop_pct']}%\n"
-        f"T1       ${tgt['t1']}   +{tgt['t1_pct']}%  → sell 50%\n"
-        f"T2       ${tgt['t2']}   +{tgt['t2_pct']}%  → sell all\n"
         f"{tgt['label']}\n"
         f"📰 {cat_label}\n"
         f"{news_line}"
@@ -1606,11 +1604,9 @@ def add_position(uid: str, sym: str, entry: float, qty: int = None):
                 f"📌 <b>Tracking {sym}</b>\n"
                 f"Entry  : ${entry:.2f}\n"
                 f"Stop   : ${tgt2['stop']}  (-{tgt2['stop_pct']}%)\n"
-                f"T1     : ${tgt2['t1']}  (+{tgt2['t1_pct']}%)  → sell 50%\n"
-                f"T2     : ${tgt2['t2']}  (+{tgt2['t2_pct']}%)  → sell rest\n"
                 f"{size_line}"
                 f"{tgt2['label']}\n\n"
-                f"I will alert you when any level is hit."
+                f"I will alert you if the stop or an exit signal is hit."
             )
         except Exception:
             send_to(uid, f"📌 Tracking {sym} at ${entry:.2f}")
@@ -1640,34 +1636,6 @@ def check_portfolio():
                     f"Price  : ${price:.2f}\n"
                     f"Entry  : ${entry:.2f}\n"
                     f"Loss   : {pct:+.1f}%\n\n<b>EXIT NOW — sell all</b>"
-                )
-                with _lock:
-                    portfolio.get(uid, {}).pop(sym, None)
-                save_portfolio()
-                time.sleep(0.3)
-                continue
-
-            elif not pos["t1_hit"] and price >= pos["t1"]:
-                send_to(uid,
-                    f"🥇 <b>TARGET 1 HIT — {sym}</b>\n"
-                    f"Price  : ${price:.2f}\n"
-                    f"Entry  : ${entry:.2f}\n"
-                    f"Profit : {pct:+.1f}%\n\n"
-                    f"→ Sell 50%\n→ Move stop to ${entry:.2f} (breakeven)"
-                )
-                with _lock:
-                    if uid in portfolio and sym in portfolio[uid]:
-                        portfolio[uid][sym]["t1_hit"] = True
-                        portfolio[uid][sym]["stop"]   = entry
-                save_portfolio()
-
-            elif pos["t1_hit"] and not pos["t2_hit"] and price >= pos["t2"]:
-                send_to(uid,
-                    f"🥈 <b>TARGET 2 HIT — {sym}</b>\n"
-                    f"Price  : ${price:.2f}\n"
-                    f"Entry  : ${entry:.2f}\n"
-                    f"Profit : {pct:+.1f}%\n\n"
-                    f"→ Sell rest — <b>FULL EXIT</b>"
                 )
                 with _lock:
                     portfolio.get(uid, {}).pop(sym, None)
@@ -1922,10 +1890,9 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
                         pl   = f"  {icon} {pct:+.1f}%  now ${price:.2f}"
                     else:
                         pl = ""
-                    t1_tag = "✅" if p.get("t1_hit") else "○"
                     lines.append(
                         f"<b>{sym}</b>  entry:${entry:.2f}{pl}\n"
-                        f"  Stop:${p['stop']:.2f}  T1:{t1_tag}${p['t1']:.2f}  T2:${p['t2']:.2f}"
+                        f"  Stop:${p['stop']:.2f}"
                     )
                 send_to(uid, "\n\n".join(lines))
             threading.Thread(target=_pf, daemon=True).start()
@@ -1980,7 +1947,7 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
                         f"📊 <b>{sym_a}</b> averaged\n"
                         f"${old_entry:.2f} + ${new_price:.2f}  →  avg <b>${avg:.2f}</b>"
                         + (f"  ×{total_qty}" if total_qty else "") + "\n"
-                        f"Stop ${tgt['stop']}   T1 ${tgt['t1']}   T2 ${tgt['t2']}"
+                        f"Stop ${tgt['stop']}"
                     )
             except ValueError:
                 send_to(uid, "❌ Format: ADD SYMBOL PRICE [SHARES]\nExample: ADD AUUD 1.75 100")
@@ -2087,7 +2054,7 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
                         send_to(uid,
                             f"✅ <b>{sym_e}</b> entry corrected\n"
                             f"${old_entry:.2f}  →  ${new_price:.2f}{qty_str}\n"
-                            f"Stop ${tgt['stop']}   T1 ${tgt['t1']}   T2 ${tgt['t2']}"
+                            f"Stop ${tgt['stop']}"
                         )
                     else:
                         # Closed trade — update last trade record in DB
@@ -2131,8 +2098,7 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
                 db.db_save_position(uid, sym_u, pos_u)
             send_to(uid,
                 f"↩️ <b>{sym_u}</b> restored to portfolio\n"
-                f"Entry ${pos_u['entry']:.2f}   Stop ${pos_u['stop']:.2f}   "
-                f"T1 ${pos_u['t1']:.2f}   T2 ${pos_u['t2']:.2f}"
+                f"Entry ${pos_u['entry']:.2f}   Stop ${pos_u['stop']:.2f}"
             )
 
     elif cmd.startswith("/setpin"):
@@ -2254,15 +2220,24 @@ def telegram_listener():
                     log.info(f"[Telegram] {uid} ({username or name}): {text}")
                     with _lock:
                         if uid in users and (name or username):
-                            stored = users[uid]
-                            real_name = name or username or uid
-                            if stored.get("name") == uid or not stored.get("name"):
-                                stored["name"] = real_name
-                            if username:
+                            stored  = users[uid]
+                            changed = False
+                            # Always refresh to the latest real Telegram name so
+                            # /users shows names, not numeric IDs.
+                            if name and stored.get("name") != name:
+                                stored["name"] = name
+                                changed = True
+                            elif not stored.get("name") or stored.get("name") == uid:
+                                stored["name"] = username or uid
+                                changed = True
+                            if username and stored.get("username") != username:
                                 stored["username"] = username
-                            if db.DB_OK:
-                                db.db_upsert_user(uid, stored["name"], username,
-                                                  stored["active"], stored.get("is_admin", False))
+                                changed = True
+                            if changed:
+                                save_users()
+                                if db.DB_OK:
+                                    db.db_upsert_user(uid, stored["name"], username,
+                                                      stored["active"], stored.get("is_admin", False))
                     cmd_pool.submit(_dispatch, uid, text, name, username)
         except Exception as e:
             log.warning(f"[Listener error] {e}")
