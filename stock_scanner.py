@@ -2166,6 +2166,15 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
 
 def telegram_listener():
     log.info("[Telegram] listener started")
+    cmd_pool = ThreadPoolExecutor(max_workers=10, thread_name_prefix="cmd")
+
+    def _dispatch(uid, text, name, username):
+        try:
+            handle_command(uid, text, name, username)
+        except Exception as e:
+            log.error(f"handle_command error: {e}")
+            send_to(uid, "❌ Something went wrong. Try again.")
+
     while True:
         try:
             updates = get_updates(_last_upd_id[0])
@@ -2179,7 +2188,6 @@ def telegram_listener():
                 username = sender.get("username", "")
                 if text and uid:
                     log.info(f"[Telegram] {uid} ({username or name}): {text}")
-                    # Keep name/username fresh in DB whenever user messages
                     with _lock:
                         if uid in users and (name or username):
                             stored = users[uid]
@@ -2191,11 +2199,7 @@ def telegram_listener():
                             if db.DB_OK:
                                 db.db_upsert_user(uid, stored["name"], username,
                                                   stored["active"], stored.get("is_admin", False))
-                    try:
-                        handle_command(uid, text, name, username)
-                    except Exception as e:
-                        log.error(f"handle_command error: {e}")
-                        send_to(uid, "❌ Something went wrong. Try again.")
+                    cmd_pool.submit(_dispatch, uid, text, name, username)
         except Exception as e:
             log.warning(f"[Listener error] {e}")
         time.sleep(2)
