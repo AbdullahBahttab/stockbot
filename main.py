@@ -745,6 +745,8 @@ WEAK_KEYWORDS = [
     "direct offering", "registered direct", "at-the-market", "atm offering",
     "shelf registration", "424b5", "424b3", "prospectus supplement",
     "underwritten offering", "follow-on offering", "secondary offering",
+    "over-allotment", "overallotment", "over allotment", "greenshoe", "green shoe",
+    "underwriters", "underwriter exercise", "exercise of the option",
     "warrant exercise", "convertible note", "pipe offering", "dilutive",
     "priced offering", "million shares", "million share offering",
     "public offering", "concurrent offering", "best efforts offering",
@@ -3807,8 +3809,12 @@ def chart(fig, h=300):
         legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color=pal["text"], size=12)),
         hoverlabel=dict(bgcolor=pal["paper"], font=dict(color=pal["text"], size=13)),
         colorway=[ACCENT, GREEN, YELLOW, CYAN, PURPLE, RED],
+        # Preserve UI state across re-renders so charts don't reset/flicker ("go and back")
+        uirevision="keep",
+        transition={"duration": 0},
     )
-    return dcc.Graph(figure=fig, config={"displayModeBar": False, "responsive": True},
+    return dcc.Graph(figure=fig, animate=False,
+                     config={"displayModeBar": False, "responsive": True},
                      style={"borderRadius": "14px"})
 
 def tbl(df: pd.DataFrame, lang="en", max_rows=100):
