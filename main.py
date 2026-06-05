@@ -622,8 +622,9 @@ MIN_PRICE       = 1.0
 MAX_PRICE       = 20.0
 SCAN_EVERY_MIN  = 2
 ALERT_COOLDOWN  = 1800    # seconds before same stock can re-alert
-MOMENTUM_ALERTS = True    # separate "high-risk momentum" channel for big runners
-                          # the strict filter rejects (unverified pumps). Set False to silence.
+MOMENTUM_ALERTS = False   # separate "high-risk momentum" channel for big runners the
+                          # strict filter rejects (unverified pumps). OFF by default —
+                          # admin can enable live with /momentum on.
 MOMENTUM_MIN_FROM_HIGH = 0.50  # skip if price has collapsed below this fraction of day high
 SCAN_WORKERS    = 10      # stocks fetched in parallel
 PORTFOLIO_SIZE  = 10_000  # default portfolio $ for position sizing
@@ -4007,6 +4008,10 @@ def page_overview(auth, lang="en"):
             marker=dict(color=ACCENT, line=dict(width=0)),
             hovertemplate="%{x}: <b>%{y}</b><extra></extra>",
         ))
+        # Treat day labels as discrete categories — otherwise Plotly reads the
+        # date strings as a datetime axis and (with only a day or two of data)
+        # zooms to unreadable sub-second ticks.
+        fig_bar.update_xaxes(type="category")
         sess = (alerts.groupby("session").size().reset_index(name="n")
                 if "session" in alerts.columns else pd.DataFrame())
         fig_pie = go.Figure()
@@ -4084,6 +4089,8 @@ def page_insights(auth, lang="en"):
             line=dict(color=ACCENT, width=2), fill="tozeroy", fillcolor=ACCENT_FILL,
             hovertemplate="%{x}<br><b>%{y:+,.2f}</b><extra></extra>",
         ))
+        # Discrete categories — avoid Plotly's datetime auto-zoom to sub-second ticks
+        fig_eq.update_xaxes(type="category")
         fig_eq.add_hline(y=0, line_color=BORDER)
         stats_block = html.Div([
             kpis,
