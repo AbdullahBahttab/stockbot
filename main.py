@@ -3301,25 +3301,37 @@ import plotly.graph_objects as go
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  THEME
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-BG      = "#0A0E1A"
-SURFACE = "#111827"
-SURF2   = "#1C2333"
-BORDER  = "#1F2D45"
-ACCENT  = "#3B82F6"
-GREEN   = "#22C55E"
-RED     = "#EF4444"
-YELLOW  = "#F59E0B"
-CYAN    = "#06B6D4"
-PURPLE  = "#A855F7"
-TEXT    = "#E2E8F0"
-MUTED   = "#64748B"
-WHITE   = "#F8FAFC"
+# Accent / semantic colors — concrete (used in BOTH HTML and Plotly), theme-independent.
+# Apple system colors so the UI reads "Apple" in light and dark.
+ACCENT  = "#0A84FF"   # Apple blue
+GREEN   = "#30D158"
+RED     = "#FF453A"
+YELLOW  = "#FF9F0A"
+CYAN    = "#64D2FF"
+PURPLE  = "#BF5AF3"
+GRADE_C = "#8E8E93"   # neutral gray (Grade C bars / funnel base)
+ACCENT_FILL = "rgba(10,132,255,0.14)"
 
-FONT_STACK = "Inter, Cairo, system-ui, -apple-system, sans-serif"
+# Theme-switching colors — CSS variables. The .theme-light / .theme-dark class on the
+# root flips them, so every inline style using these restyles instantly on toggle.
+BG      = "var(--bg)"
+SURFACE = "var(--surface)"
+SURF2   = "var(--surf2)"
+BORDER  = "var(--border)"
+TEXT    = "var(--text)"
+MUTED   = "var(--muted)"
+WHITE   = "var(--strong)"      # high-emphasis text (near-white on dark, near-black on light)
 
-# Translucent accent for chart area fills. Plotly rejects 8-digit hex (#RRGGBBAA),
-# so use rgba — ACCENT (#3B82F6) at ~13% opacity.
-ACCENT_FILL = "rgba(59,130,246,0.13)"
+FONT_STACK = '-apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Inter", "Cairo", system-ui, sans-serif'
+
+# Concrete palettes for Plotly (CSS variables can't reach the chart canvas).
+PALETTE = {
+    "dark":  {"paper": "#1C1C1E", "text": "#EBEBF0", "grid": "rgba(255,255,255,0.12)", "tick": "#8E8E93"},
+    "light": {"paper": "#FFFFFF", "text": "#1D1D1F", "grid": "rgba(0,0,0,0.10)",       "tick": "#6E6E73"},
+}
+_theme_ctx = threading.local()   # per-request theme so charts pick the right palette
+def _theme() -> str:
+    return getattr(_theme_ctx, "value", "dark")
 
 _INPUT = {
     "width": "100%", "boxSizing": "border-box",
@@ -3551,7 +3563,7 @@ def fmt_usd(v):
 def kpi(label, value, sub="", color=ACCENT):
     return html.Div(style={
         "background":  SURFACE, "border": f"1px solid {BORDER}",
-        "borderTop":   f"3px solid {color}", "borderRadius": "10px",
+        "borderTop":   f"3px solid {color}", "borderRadius": "16px", "boxShadow": "var(--shadow)",
         "padding":     "16px 18px", "flex": "1", "minWidth": "130px",
     }, children=[
         html.P(label, style={"color": MUTED, "fontSize": "10px", "fontWeight": "700",
@@ -3569,7 +3581,7 @@ def kpi_row(children):
 def card(children, mb="14px"):
     return html.Div(children, style={
         "background": SURFACE, "border": f"1px solid {BORDER}",
-        "borderRadius": "10px", "padding": "18px 20px", "marginBottom": mb,
+        "borderRadius": "16px", "padding": "18px 20px", "marginBottom": mb, "boxShadow": "var(--shadow)",
     })
 
 def sec(text, color=MUTED):
@@ -3585,18 +3597,36 @@ def empty_msg(msg):
                                  "textAlign": "center", "padding": "40px",
                                  "whiteSpace": "pre-line"})
 
-def chart(fig, h=280):
+def _fig_has_data(fig) -> bool:
+    for tr in (fig.data or []):
+        for attr in ("y", "x", "values", "labels"):
+            v = getattr(tr, attr, None)
+            if v is not None and len(v) > 0:
+                return True
+    return False
+
+def chart(fig, h=300):
+    if not _fig_has_data(fig):
+        return html.Div("— no data yet —", style={
+            "color": MUTED, "fontSize": "13px", "fontWeight": "600",
+            "height": f"{h}px", "display": "flex", "alignItems": "center",
+            "justifyContent": "center", "background": SURF2, "borderRadius": "14px",
+        })
+    pal = PALETTE.get(_theme(), PALETTE["dark"])
     fig.update_layout(
-        height=h, paper_bgcolor=SURFACE, plot_bgcolor=SURF2,
-        font=dict(color=TEXT, family=FONT_STACK, size=11),
-        margin=dict(t=12, b=28, l=10, r=10),
-        xaxis=dict(gridcolor=BORDER, linecolor=BORDER),
-        yaxis=dict(gridcolor=BORDER, linecolor=BORDER),
-        legend=dict(bgcolor="rgba(0,0,0,0)", bordercolor=BORDER),
-        hoverlabel=dict(bgcolor=SURF2, bordercolor=BORDER, font=dict(color=TEXT)),
+        height=h, paper_bgcolor=pal["paper"], plot_bgcolor=pal["paper"],
+        font=dict(color=pal["text"], family=FONT_STACK, size=13),
+        margin=dict(t=20, b=46, l=54, r=22),
+        xaxis=dict(gridcolor=pal["grid"], linecolor=pal["grid"], automargin=True,
+                   tickfont=dict(color=pal["tick"], size=12)),
+        yaxis=dict(gridcolor=pal["grid"], linecolor=pal["grid"], automargin=True,
+                   tickfont=dict(color=pal["tick"], size=12)),
+        legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color=pal["text"], size=12)),
+        hoverlabel=dict(bgcolor=pal["paper"], font=dict(color=pal["text"], size=13)),
+        colorway=[ACCENT, GREEN, YELLOW, CYAN, PURPLE, RED],
     )
     return dcc.Graph(figure=fig, config={"displayModeBar": False, "responsive": True},
-                     style={"borderRadius": "8px"})
+                     style={"borderRadius": "14px"})
 
 def tbl(df: pd.DataFrame, lang="en", max_rows=100):
     if df is None or df.empty:
@@ -3885,10 +3915,10 @@ def page_insights(auth, lang="en"):
             y=g["symbol"], x=g["pnl"], orientation="h",
             marker_color=[GREEN if v >= 0 else RED for v in g["pnl"]],
             text=[fmt_usd(v) for v in g["pnl"]],
-            textposition="outside", textfont=dict(color=TEXT),
+            textposition="outside",
         ))
         fig_lb.update_layout(yaxis=dict(autorange="reversed"),
-                             xaxis=dict(zeroline=True, zerolinecolor=BORDER))
+                             xaxis=dict(zeroline=True, zerolinecolor="rgba(128,128,128,0.45)"))
 
         head = html.Tr([
             html.Th(h, style={"padding": "9px 12px", "background": BG, "color": MUTED,
@@ -3935,7 +3965,7 @@ def page_insights(auth, lang="en"):
         y=[t("funnel_scanned", lang), t("funnel_passed", lang),
            t("funnel_alerted", lang), t("funnel_worked", lang)],
         x=[scanned, passed, alerted, worked],
-        marker=dict(color=[MUTED, ACCENT, YELLOW, GREEN]),
+        marker=dict(color=[GRADE_C, ACCENT, YELLOW, GREEN]),
         textinfo="value+percent initial",
     ))
 
@@ -3945,12 +3975,12 @@ def page_insights(auth, lang="en"):
         gp = (al.dropna(subset=["pct_after_alert"])
                 .groupby("grade")["pct_after_alert"].mean().reset_index())
         if not gp.empty:
-            gc = {"A": GREEN, "B": ACCENT, "C": MUTED}
+            gc = {"A": GREEN, "B": ACCENT, "C": GRADE_C}
             fig_grade.add_trace(go.Bar(
                 x=gp["grade"], y=gp["pct_after_alert"].round(2),
                 marker_color=[gc.get(g, ACCENT) for g in gp["grade"]],
                 text=[f"{v:+.1f}%" for v in gp["pct_after_alert"]],
-                textposition="outside", textfont=dict(color=TEXT)))
+                textposition="outside"))
 
     funnel = html.Div(className="charts-grid", style={"display": "grid",
                        "gridTemplateColumns": "1fr 1fr", "gap": "12px",
@@ -3989,19 +4019,19 @@ def page_alerts(auth, lang="en"):
         top_syms = (df.groupby("symbol").size().reset_index(name="n").nlargest(10, "n")
                     if "symbol" in df.columns else pd.DataFrame())
         fig_g, fig_s, fig_t = go.Figure(), go.Figure(), go.Figure()
-        gc = {"A": GREEN, "B": ACCENT, "C": MUTED}
+        gc = {"A": GREEN, "B": ACCENT, "C": GRADE_C}
         if not by_grade.empty:
             fig_g.add_trace(go.Bar(x=by_grade["grade"], y=by_grade["n"],
                 marker_color=[gc.get(g, ACCENT) for g in by_grade["grade"]],
-                text=by_grade["n"], textposition="outside", textfont=dict(color=TEXT)))
+                text=by_grade["n"], textposition="outside"))
         if not by_sess.empty:
             fig_s.add_trace(go.Bar(x=by_sess["session"], y=by_sess["n"],
                 marker_color=YELLOW,
-                text=by_sess["n"], textposition="outside", textfont=dict(color=TEXT)))
+                text=by_sess["n"], textposition="outside"))
         if not top_syms.empty:
             fig_t.add_trace(go.Bar(y=top_syms["symbol"], x=top_syms["n"],
                 orientation="h", marker_color=CYAN,
-                text=top_syms["n"], textposition="outside", textfont=dict(color=TEXT)))
+                text=top_syms["n"], textposition="outside"))
             fig_t.update_layout(yaxis=dict(autorange="reversed"))
         charts = html.Div(className="charts-grid", style={"display": "grid",
                                    "gridTemplateColumns": "1fr 1fr 1fr",
@@ -4102,10 +4132,10 @@ def _render_trades_content(df, is_admin, lang="en"):
             y=sym_pnl["symbol"], x=sym_pnl["pnl_dollar"], orientation="h",
             marker_color=[GREEN if v >= 0 else RED for v in sym_pnl["pnl_dollar"]],
             text=[fmt_usd(v) for v in sym_pnl["pnl_dollar"]],
-            textposition="outside", textfont=dict(color=TEXT),
+            textposition="outside",
         ))
         fig_sym.update_layout(yaxis=dict(autorange="reversed"),
-                               xaxis=dict(zeroline=True, zerolinecolor=BORDER))
+                               xaxis=dict(zeroline=True, zerolinecolor="rgba(128,128,128,0.45)"))
 
     fig_cum = go.Figure()
     if "pnl_dollar" in df.columns:
@@ -4222,7 +4252,7 @@ def page_scan(auth, lang="en"):
         fig_skip.add_trace(go.Bar(
             y=skip_df["reason"], x=skip_df["count"], orientation="h",
             marker_color=RED, text=skip_df["count"],
-            textposition="outside", textfont=dict(color=TEXT),
+            textposition="outside",
         ))
         fig_skip.update_layout(yaxis=dict(autorange="reversed"))
 
@@ -4317,39 +4347,42 @@ app.index_string = """
     {%favicon%}
     {%css%}
     <style>
-        html, body { margin: 0; padding: 0; background: #0A0E1A;
-                     -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
-        * { -webkit-tap-highlight-color: transparent; }
-        /* Plotly charts fill their card and resize on rotate */
-        .js-plotly-plot, .plot-container, .svg-container { width: 100% !important; }
-        .login-card { max-width: 92vw !important; }
-        /* Arabic is cursive — letter-spacing breaks letter joining, so kill it in RTL */
-        [dir="rtl"] * { letter-spacing: normal !important; }
-
-        /* Phones + iPad portrait */
-        @media (max-width: 900px) {
-            .app-shell    { flex-direction: column !important; min-height: auto !important; }
-            .app-sidebar  { width: 100% !important; min-width: 0 !important;
-                            height: auto !important; position: static !important;
-                            flex-direction: row !important; align-items: center !important;
-                            flex-wrap: wrap !important; border-right: none !important;
-                            border-bottom: 1px solid #1F2D45 !important; }
-            .sidebar-hide-mobile { display: none !important; }
-            .nav-links    { flex-direction: row !important; flex: 1 1 100% !important;
-                            overflow-x: auto !important; padding: 6px 8px !important;
-                            -webkit-overflow-scrolling: touch !important; }
-            .nav-links a  { border-right: none !important; white-space: nowrap !important;
-                            padding: 10px 14px !important; }
-            .charts-grid  { grid-template-columns: 1fr !important; }
-            .content-pad  { padding: 16px 14px !important; }
-            .topbar       { padding: 12px 14px !important; flex-wrap: wrap !important;
-                            gap: 10px !important; }
+        html, body { margin:0; padding:0; background:var(--bg); -webkit-text-size-adjust:100%; text-size-adjust:100%; }
+        * { -webkit-tap-highlight-color:transparent; box-sizing:border-box; }
+        * { transition: background-color .25s ease, border-color .25s ease, color .18s ease; }
+        .theme-dark{
+            --bg:#0B0B0C; --surface:#1C1C1E; --surf2:#2C2C2E;
+            --border:rgba(255,255,255,0.12); --text:#EBEBF0; --muted:#8E8E93; --strong:#FFFFFF;
+            --shadow:0 1px 2px rgba(0,0,0,.5), 0 8px 28px rgba(0,0,0,.35);
+            --topbar:rgba(28,28,30,.72);
         }
-        /* Small phones */
-        @media (max-width: 420px) {
-            .login-card { width: 100% !important; padding: 28px 22px !important;
-                          border-radius: 12px !important; }
-            .topbar h2  { font-size: 14px !important; }
+        .theme-light{
+            --bg:#F5F5F7; --surface:#FFFFFF; --surf2:#F0F0F3;
+            --border:rgba(0,0,0,0.10); --text:#1D1D1F; --muted:#6E6E73; --strong:#000000;
+            --shadow:0 1px 2px rgba(0,0,0,.06), 0 8px 28px rgba(0,0,0,.08);
+            --topbar:rgba(255,255,255,.72);
+        }
+        .js-plotly-plot, .plot-container, .svg-container { width:100% !important; }
+        [dir="rtl"] * { letter-spacing:normal !important; }
+        .login-card { max-width:92vw !important; }
+        .topbar { background:var(--topbar) !important; border-bottom:1px solid var(--border) !important;
+                  backdrop-filter:saturate(180%) blur(20px); -webkit-backdrop-filter:saturate(180%) blur(20px); }
+        @media (max-width:900px){
+            .app-shell{ flex-direction:column !important; min-height:auto !important; }
+            .app-sidebar{ width:100% !important; min-width:0 !important; height:auto !important; position:static !important;
+                          flex-direction:row !important; align-items:center !important; flex-wrap:wrap !important;
+                          border-right:none !important; border-bottom:1px solid var(--border) !important; }
+            .sidebar-hide-mobile{ display:none !important; }
+            .nav-links{ flex-direction:row !important; flex:1 1 100% !important; overflow-x:auto !important;
+                        padding:6px 8px !important; -webkit-overflow-scrolling:touch !important; }
+            .nav-links a{ border-right:none !important; white-space:nowrap !important; padding:10px 14px !important; }
+            .charts-grid{ grid-template-columns:1fr !important; }
+            .content-pad{ padding:16px 14px !important; }
+            .topbar{ padding:12px 14px !important; flex-wrap:wrap !important; gap:10px !important; }
+        }
+        @media (max-width:420px){
+            .login-card{ width:100% !important; padding:28px 22px !important; border-radius:20px !important; }
+            .topbar h2{ font-size:14px !important; }
         }
     </style>
 </head>
@@ -4375,23 +4408,26 @@ def _lang_btn_style():
             "fontSize": "11px", "fontWeight": "700", "cursor": "pointer"}
 
 app.layout = html.Div(
-    id="root-container", dir="ltr",
+    id="root-container", dir="ltr", className="theme-dark",
     style={"backgroundColor": BG, "fontFamily": FONT_STACK,
            "color": TEXT, "minHeight": "100vh"},
     children=[
         dcc.Location(id="url", refresh=False),
         dcc.Store(id="auth", storage_type="local"),
         dcc.Store(id="lang", storage_type="local"),
+        dcc.Store(id="theme", storage_type="local"),
         dcc.Interval(id="tick", interval=30_000),
 
         html.Div(id="login-section", style=_SHOW_LOGIN, children=[
             html.Div(className="login-card", style={
                 "width": "380px", "background": SURFACE,
                 "border": f"1px solid {BORDER}",
-                "borderRadius": "16px", "padding": "40px",
+                "borderRadius": "20px", "padding": "40px", "boxShadow": "var(--shadow)",
             }, children=[
                 html.Div(style={"display": "flex", "justifyContent": "flex-end",
-                                "marginBottom": "8px"}, children=[
+                                "gap": "8px", "marginBottom": "8px"}, children=[
+                    html.Button("☀️", id="theme-toggle-login",
+                                n_clicks=0, style=_lang_btn_style()),
                     html.Button(t("lang_switch", "en"), id="lang-toggle-login",
                                 n_clicks=0, style=_lang_btn_style()),
                 ]),
@@ -4450,6 +4486,8 @@ app.layout = html.Div(
                         html.Div(style={"display":"flex","alignItems":"center","gap":"14px"}, children=[
                             html.Div(id="mkt-badge"),
                             html.Div(id="user-badge"),
+                            html.Button("☀️", id="theme-toggle",
+                                        n_clicks=0, style=_lang_btn_style()),
                             html.Button(t("lang_switch", "en"), id="lang-toggle",
                                         n_clicks=0, style=_lang_btn_style()),
                             html.Button(t("sign_out", "en"), id="logout-btn", n_clicks=0, style={
@@ -4516,6 +4554,31 @@ def apply_language(lang):
     )
 
 
+# Appearance toggle (light <-> dark), persisted per device
+@app.callback(
+    Output("theme", "data"),
+    Input("theme-toggle",       "n_clicks"),
+    Input("theme-toggle-login", "n_clicks"),
+    State("theme", "data"),
+    prevent_initial_call=True,
+)
+def toggle_theme(_n1, _n2, cur):
+    return "light" if (cur or "dark") == "dark" else "dark"
+
+
+# Apply the theme class to the root container + refresh the toggle icons
+@app.callback(
+    Output("root-container",     "className"),
+    Output("theme-toggle",       "children"),
+    Output("theme-toggle-login", "children"),
+    Input("theme", "data"),
+)
+def apply_theme(theme):
+    theme = "light" if theme == "light" else "dark"
+    icon  = "🌙" if theme == "light" else "☀️"   # icon shows the mode you'll switch TO
+    return f"theme-{theme}", icon, icon
+
+
 @app.callback(
     Output("trades-body",         "children"),
     Output("trades-filter-day",   "style"),
@@ -4525,12 +4588,14 @@ def apply_language(lang):
     Input("trades-filter-month",  "value"),
     Input("auth", "data"),
     Input("lang", "data"),
+    Input("theme", "data"),
     prevent_initial_call=False,
 )
-def update_trades_content(filter_type, sel_day, sel_month, auth, lang):
+def update_trades_content(filter_type, sel_day, sel_month, auth, lang, theme):
     if not auth or not auth.get("chat_id"):
         return no_update, no_update, no_update
     lang = lang if lang in TR else "en"
+    _theme_ctx.value = "light" if theme == "light" else "dark"
 
     uid      = int(auth["chat_id"])
     is_admin = auth["is_admin"]
@@ -4577,12 +4642,14 @@ def update_trades_content(filter_type, sel_day, sel_month, auth, lang):
     Input("url",   "pathname"),
     Input("auth",  "data"),
     Input("lang",  "data"),
+    Input("theme", "data"),
     Input("tick",  "n_intervals"),
 )
-def route(pathname, auth, lang, _):
+def route(pathname, auth, lang, theme, _):
     if not auth or not auth.get("chat_id"):
         return _SHOW_LOGIN, _HIDE, [], "", "", "", ""
     lang = lang if lang in TR else "en"
+    _theme_ctx.value = "light" if theme == "light" else "dark"
 
     page = (pathname or "/").strip("/") or "overview"
     if page not in PAGE_MAP:
