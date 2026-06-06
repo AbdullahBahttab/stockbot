@@ -619,7 +619,7 @@ TRACKED_FILE   = os.path.join(BASE_DIR, "tracked.json")
 LOG_FILE       = os.path.join(BASE_DIR, "scanner.log")
 
 MIN_PRICE       = 1.0
-MAX_PRICE       = 20.0
+MAX_PRICE       = 50.0
 SCAN_EVERY_MIN  = 2
 ALERT_COOLDOWN  = 1800    # seconds before same stock can re-alert
 MOMENTUM_ALERTS = False   # separate "high-risk momentum" channel for big runners the
@@ -1338,6 +1338,68 @@ def calc_obv_trend(closes: list, vols: list) -> str:
     return "→"
 
 
+def calc_ema(series: list, period: int) -> list | None:
+    """Exponential moving average over an oldest-first series. None if too short."""
+    if not series or len(series) < period:
+        return None
+    k   = 2 / (period + 1)
+    ema = series[0]
+    out = [ema]
+    for x in series[1:]:
+        ema = x * k + ema * (1 - k)
+        out.append(ema)
+    return out
+
+
+def calc_ignition(closes: list, vols: list,
+                  vwap: float | None, price: float | None) -> dict:
+    """
+    Is an intraday move *igniting* — real and just starting — or extended/fading?
+    Computed entirely from the m5 bars already fetched, so no extra API calls.
+
+    All inputs are oldest-first. Returns:
+      vwap_hold : price + last 2 closes above VWAP (buyers in control)
+      vol_surge : last-15-min avg volume ÷ prior-30-min avg volume   (x)
+      accel_pct : % price change over the last ~25 min (5 bars)
+      ema_up    : price above a rising 9-period EMA (trend, not chop)
+      score     : 0–4 — how many of the four signals are firing
+      tags      : short labels for the alert message
+    """
+    out = {"vwap_hold": False, "vol_surge": 0.0, "accel_pct": 0.0,
+           "ema_up": False, "score": 0, "tags": []}
+    if not closes or len(closes) < 6 or not price:
+        return out
+
+    # 1. VWAP reclaim / hold — price and the last two closes above VWAP.
+    if vwap and vwap > 0:
+        out["vwap_hold"] = price > vwap and closes[-1] > vwap and closes[-2] > vwap
+
+    # 2. Volume surge — last 3 bars vs the prior 6. Averaging makes it robust to
+    #    the newest (partial, still-forming) bar understating volume.
+    if len(vols) >= 9:
+        recent = sum(vols[-3:]) / 3
+        base   = sum(vols[-9:-3]) / 6
+        out["vol_surge"] = round(recent / base, 1) if base > 0 else 0.0
+
+    # 3. Acceleration — % move over the last 5 bars (~25 min).
+    if closes[-6] > 0:
+        out["accel_pct"] = round((closes[-1] - closes[-6]) / closes[-6] * 100, 1)
+
+    # 4. Short-EMA trend — price above a rising 9-EMA.
+    ema = calc_ema(closes, 9)
+    if ema and len(ema) >= 3:
+        out["ema_up"] = price > ema[-1] and ema[-1] > ema[-3]
+
+    tags = []
+    if out["vwap_hold"]:       tags.append("VWAP reclaim")
+    if out["vol_surge"] >= 2:  tags.append(f"vol surge {out['vol_surge']:g}x")
+    if out["accel_pct"] >= 3:  tags.append(f"accel +{out['accel_pct']:g}%/25m")
+    if out["ema_up"]:          tags.append("9-EMA up")
+    out["tags"]  = tags
+    out["score"] = len(tags)
+    return out
+
+
 def _fetch_yahoo_news(symbol: str) -> str | None:
     """
     Fetch latest news headline from Yahoo Finance search API.
@@ -1566,6 +1628,7 @@ def fetch_webull(symbol: str) -> dict | None:
 
             mfi       = None
             obv_trend = "→"
+            ignition  = None
 
             if inr.status_code == 200:
                 intraday_bars = _parse_candle_bars(inr)
@@ -1588,6 +1651,9 @@ def fetch_webull(symbol: str) -> dict | None:
                     if len(C5) >= 15:
                         mfi       = calc_mfi(H5, L5, C5, V5)
                         obv_trend = calc_obv_trend(C5, V5)
+                    # Ignition — is this move real & just starting? (m5 only)
+                    if len(C5) >= 6:
+                        ignition = calc_ignition(C5, V5, vwap, price)
 
             # Daily RSI fallback — when pre-market has <15 m5 bars
             if rsi is None and dr.status_code == 200:
@@ -1673,6 +1739,7 @@ def fetch_webull(symbol: str) -> dict | None:
                 "float_estimated": float_estimated,
                 "change_pct": change_pct,
                 "mfi": mfi, "obv_trend": obv_trend,
+                "ignition": ignition,
                 "prev_close": sf(q.get("preClose")),   # yesterday's close — for gap %
             }
         except Exception:
@@ -1841,6 +1908,12 @@ def fetch_stock_data(symbol: str) -> dict | None:
         if webull.get("news"):        data["news"]    = webull["news"]
         if webull.get("vwap"):        data["vwap"]    = webull["vwap"]
         if webull.get("prev_close"):  data["prev_close"] = webull["prev_close"]
+        # Intraday signals (these had been computed but never merged, so the
+        # MFI/OBV/ignition rules downstream never actually saw them).
+        if webull.get("mfi") is not None:        data["mfi"]        = webull["mfi"]
+        if webull.get("obv_trend"):              data["obv_trend"]  = webull["obv_trend"]
+        if webull.get("ignition"):               data["ignition"]   = webull["ignition"]
+        if webull.get("change_pct") is not None: data["change_pct"] = webull["change_pct"]
 
     # Yahoo float fills gap when Webull fundamentals (417) and Finviz both fail
     if not data.get("float_m") and yf_float:
@@ -2077,7 +2150,16 @@ def calc_targets(price: float, fv: dict) -> dict:
 
 
 def compute_grade(stock: dict, fv: dict) -> str:
-    pts = 0
+    """
+    Grade A / B / C from six 0–2 dimensions (max 12):
+      momentum (RSI)        — room to run, not exhausted
+      float                 — tighter float moves faster
+      volume / turnover     — real participation
+      catalyst              — a genuine reason for the move
+      entry position        — near day low (good) vs at the high (chasing)
+      ignition              — the move is real & starting (VWAP/accel/vol/EMA)
+    A ≥ 9, B ≥ 6, else C.
+    """
     rsi = fv.get("rsi")
     flt = fv.get("float_m")
     rv  = fv.get("rel_vol")
@@ -2086,22 +2168,39 @@ def compute_grade(stock: dict, fv: dict) -> str:
     l   = fv.get("low")
     p   = fv.get("price") or stock["price"]
 
-    if rsi: pts += 2 if rsi < 50 else (1 if rsi < 65 else 0)
-    if flt: pts += 2 if flt < 5  else (1 if flt < 15  else 0)
+    pts = 0
 
-    # Micro-float (< 2M): use float turnover — RelVol is misleading at this size
-    # Normal float: use RelVol
+    # 1. Momentum — best when there's still room to run.
+    if rsi:
+        pts += 2 if rsi < 50 else (1 if rsi < 65 else 0)
+
+    # 2. Float — tighter float = faster move.
+    if flt:
+        pts += 2 if flt < 5 else (1 if flt < 15 else 0)
+
+    # 3. Volume — micro-float (<2M) uses float turnover (RelVol is misleading
+    #    at that size); everything else uses RelVol.
     if flt and flt < 2.0 and vol:
-        turnover = vol / (flt * 1_000_000)  # % of float traded today
+        turnover = vol / (flt * 1_000_000)   # fraction of float traded today
         pts += 2 if turnover > 0.20 else (1 if turnover > 0.10 else 0)
     elif rv:
         pts += 2 if rv > 20 else (1 if rv > 5 else 0)
 
+    # 4. Catalyst (0–2).
     pts += score_catalyst(fv.get("news", ""))[0]
+
+    # 5. Entry position — reward near day-low, penalise chasing the high.
     if h and l and h != l:
         pos  = (p - l) / (h - l)
         pts += 2 if pos < 0.35 else (1 if pos < 0.70 else 0)
-    return "A" if pts >= 8 else ("B" if pts >= 5 else "C")
+
+    # 6. Ignition — is the move real & just starting?
+    ign = fv.get("ignition")
+    if ign:
+        s = ign.get("score", 0)
+        pts += 2 if s >= 3 else (1 if s >= 1 else 0)
+
+    return "A" if pts >= 9 else ("B" if pts >= 6 else "C")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -2114,6 +2213,13 @@ def range_bar(price, high, low) -> str:
     pos   = (price - low) / (high - low) * 100
     label = "🟢 Low (good entry)" if pos < 35 else ("🟡 Mid" if pos < 70 else "🔴 High — wait for dip")
     return f"{pos:.0f}%  {label}"
+
+def ignition_line(fv) -> str:
+    """One line showing why the move looks real & starting, or '' if no signal."""
+    ign = fv.get("ignition")
+    if not ign or not ign.get("tags"):
+        return ""
+    return "🚀 " + "  ·  ".join(ign["tags"]) + "\n"
 
 def gap_line(price, fv) -> str:
     """One-line gap from yesterday's close, or '' when prev close is unknown."""
@@ -2143,6 +2249,7 @@ def build_alert_simple(stock: dict, fv: dict, session: str) -> str:
         f"Entry    ${entry_lo} – ${entry_hi}\n"
         f"Stop     ${tgt['stop']}   -{tgt['stop_pct']}%\n"
         f"{tgt['label']}\n"
+        f"{ignition_line(fv)}"
         f"📰 {cat_label}\n"
         f"{news_line}"
         f"{D}\n"
@@ -2207,11 +2314,21 @@ def build_alert(stock: dict, fv: dict, session: str) -> str:
     news_line    = f"<i>{news[:120]}</i>\n" if news and news != "—" else ""
     D = "━━━━━━━━━━━━━━━━━━━━"
 
+    # Indicator summary — full analysis shows the numbers behind the grade.
+    ind_bits = []
+    if fv.get("rsi") is not None:       ind_bits.append(f"RSI {fv['rsi']:.0f}")
+    if fv.get("mfi") is not None:       ind_bits.append(f"MFI {fv['mfi']:.0f}")
+    if fv.get("obv_trend", "→") != "→": ind_bits.append(f"OBV {fv['obv_trend']}")
+    if fv.get("rel_vol"):               ind_bits.append(f"RelVol {fv['rel_vol']:.0f}x")
+    ind_line = ("📊 " + "   ".join(ind_bits) + "\n") if ind_bits else ""
+
     return (
         f"{grade_icon} <b>{sym}</b>   ${price:.2f}   {change:+.1f}%\n"
         f"Entry    ${entry_lo} – ${entry_hi}\n"
         f"Stop     ${tgt['stop']}   -{tgt['stop_pct']}%\n"
         f"{tgt['label']}\n"
+        f"{ignition_line(fv)}"
+        f"{ind_line}"
         f"📰 {cat_label}\n"
         f"{news_line}"
         f"{D}\n"
@@ -3144,6 +3261,16 @@ def passes_filters(stock: dict, fv: dict, f: dict) -> tuple:
     # 8. Extreme relative volume with no catalyst = coordinated buying
     if rv and rv > 50 and chg > 80 and cat_pts == 0:
         return False, f"RelVol {rv:.0f}x + {chg:.0f}% + no catalyst — unusual volume spike"
+    # 9. Ignition gate — a big move that isn't backed by a strong catalyst must
+    #    show the move is real & still firing (VWAP hold / accel / vol surge).
+    #    No ignition at all = extended or fading, not a fresh entry.
+    ign = fv.get("ignition")
+    if ign and chg >= 50 and cat_pts < 2:
+        if ign.get("accel_pct", 0) <= -6:
+            return False, f"rolling over {ign['accel_pct']:.0f}% over last 25m — momentum fading"
+        if ign.get("score", 0) == 0:
+            return False, (f"{chg:.0f}% but no ignition (no VWAP hold / accel / vol surge) "
+                           f"— extended or fading, not a fresh move")
 
     if flt and flt > f["max_float_m"]:    return False, f"float {flt:.1f}M > {f['max_float_m']:.0f}M"
     if mc  and mc  > f["max_mcap_m"]:     return False, f"mcap ${mc:.0f}M > ${f['max_mcap_m']:.0f}M"
