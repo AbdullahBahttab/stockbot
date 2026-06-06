@@ -133,6 +133,25 @@ def setup_db():
         conn.close()
 
 
+def migrate_db():
+    """One-off data fixes, safe to run on every startup."""
+    conn = get_conn()
+    if not conn:
+        return
+    try:
+        # Breakeven trades (entry == exit, 0% P&L) were mislabeled LOSS.
+        cur = conn.execute(
+            "UPDATE trades SET result='FLAT' "
+            "WHERE result='LOSS' AND (pnl_pct = 0 OR entry_price = exit_price)")
+        if cur.rowcount:
+            log.info(f"[DB] migrated {cur.rowcount} breakeven trade(s) LOSS→FLAT")
+        conn.commit()
+    except Exception as e:
+        log.error(f"[DB] migrate: {e}")
+    finally:
+        conn.close()
+
+
 def test_connection() -> bool:
     """Call once at startup. Creates tables and sets DB_OK flag."""
     global DB_OK
@@ -141,6 +160,7 @@ def test_connection() -> bool:
     if conn:
         conn.close()
         DB_OK = True
+        migrate_db()
         log.info(f"[DB] SQLite connected OK  ({DB_PATH})")
     else:
         DB_OK = False
@@ -4128,6 +4148,20 @@ def empty_msg(msg):
                                  "textAlign": "center", "padding": "40px",
                                  "whiteSpace": "pre-line"})
 
+def relabel_breakeven(df):
+    """Return a copy with breakeven trades (0% / entry == exit) shown as FLAT
+    instead of LOSS — robust even if the DB migration hasn't run."""
+    if df is None or df.empty or "result" not in df.columns:
+        return df
+    df = df.copy()
+    be = pd.Series(False, index=df.index)
+    if "pnl_pct" in df.columns:
+        be = be | (df["pnl_pct"].fillna(-1) == 0)
+    if {"entry_price", "exit_price"} <= set(df.columns):
+        be = be | (df["entry_price"] == df["exit_price"])
+    df.loc[(df["result"] == "LOSS") & be, "result"] = "FLAT"
+    return df
+
 def _fig_has_data(fig) -> bool:
     for tr in (fig.data or []):
         for attr in ("y", "x", "values", "labels"):
@@ -4376,7 +4410,7 @@ def page_overview(auth, lang="en"):
             card([sec(t("sec_by_session", lang)),     chart(fig_pie, 240)], mb="0"),
         ])
 
-    my_trades = q(f"SELECT * FROM trades WHERE chat_id = {uid} ORDER BY closed_at DESC")
+    my_trades = relabel_breakeven(q(f"SELECT * FROM trades WHERE chat_id = {uid} ORDER BY closed_at DESC"))
     cols = [c for c in ["symbol","entry_price","exit_price","qty",
                          "pnl_dollar","pnl_pct","result","trade_date"]
             if c in my_trades.columns]
@@ -4748,10 +4782,14 @@ def _render_trades_content(df, is_admin, lang="en"):
     if df.empty:
         return card(empty_msg(t("no_trades_period", lang)))
 
+    # Breakeven trade (0% / entry == exit) is FLAT, not a LOSS.
+    df = relabel_breakeven(df)
+
     total  = len(df)
     wins   = int((df["result"] == "WIN").sum())
-    losses = total - wins
-    wr     = round(wins / total * 100, 1)
+    losses = int((df["result"] == "LOSS").sum())
+    decided = wins + losses
+    wr     = round(wins / decided * 100, 1) if decided else 0
     pnl    = round(df["pnl_dollar"].sum(), 2) if "pnl_dollar" in df.columns else 0
     avg_w  = (round(df.loc[df["result"]=="WIN",  "pnl_dollar"].mean(), 2)
               if wins   and "pnl_dollar" in df.columns else 0)
