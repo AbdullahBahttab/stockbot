@@ -2335,7 +2335,7 @@ def build_alert_simple(stock: dict, fv: dict, session: str) -> str:
     change = stock["change"]
     news   = fv.get("news", "")
     grade  = compute_grade(stock, fv)
-    grade_icon   = {"A": "🅰️", "B": "🅱️", "C": "⚠️"}[grade]
+    grade_icon   = {"A": "🥇", "B": "🥈", "C": "⚠️"}[grade]
     _, cat_label = score_catalyst(news)
     tgt          = calc_targets(price, fv)
     entry_lo     = round(price * 0.99, 2)
@@ -2404,7 +2404,7 @@ def build_alert(stock: dict, fv: dict, session: str) -> str:
     news   = fv.get("news", "")
 
     grade      = compute_grade(stock, fv)
-    grade_icon = {"A": "🅰️", "B": "🅱️", "C": "⚠️"}[grade]
+    grade_icon = {"A": "🥇", "B": "🥈", "C": "⚠️"}[grade]
     _, cat_label = score_catalyst(news)
     tgt          = calc_targets(price, fv)
     entry_lo     = round(price * 0.99, 2)
@@ -2619,8 +2619,8 @@ TERMS_TEXT = (
 GUIDE_TEXT = (
     "📘 <b>How to Use / كيفية الاستخدام</b>\n\n"
     "<b>📊 Grades / التقييمات</b>\n"
-    "🅰️ A = strong setup — best trades\n"
-    "🅱️ B = good setup\n"
+    "🥇 A = strong setup — best trades\n"
+    "🥈 B = good setup\n"
     "⚠️ C = weak — not alerted\n"
     "⚡ HIGH-RISK MOMENTUM = big runner, unverified pump — risky, trade small\n\n"
     "<b>💼 Position commands / أوامر الصفقات</b>\n"
@@ -2919,7 +2919,7 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
                     entry = p["entry"]
                     if price:
                         pct  = (price - entry) / entry * 100
-                        icon = "🟢" if pct >= 0 else "🔴"
+                        icon = "⚪" if pct == 0 else ("🟢" if pct > 0 else "🔴")
                         pl   = f"  {icon} {pct:+.1f}%  now ${price:.2f}"
                     else:
                         pl = ""
@@ -3017,7 +3017,7 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
                     )
                 if exit_price:
                     pnl_p  = (exit_price - entry) / entry * 100 if entry else 0
-                    icon   = "🟢" if exit_price >= entry else "🔴"
+                    icon   = "🟢" if exit_price > entry else ("⚪" if exit_price == entry else "🔴")
                     pnl_d  = round((exit_price - entry) * qty_final, 2) if qty_final else None
                     pnl_d_str = f"  (${pnl_d:+.2f})" if pnl_d is not None else ""
                     send_to(uid,
@@ -4626,7 +4626,7 @@ def page_insights(auth, lang="en"):
             wcol = GREEN if wr_g >= 50 else (YELLOW if wr_g >= 40 else RED)
             acol = GREEN if avg >= 0 else RED
             body.append(html.Tr([
-                html.Td(html.B(f"{'🅰️' if grade == 'A' else '🅱️'} {grade}"),
+                html.Td(html.B(f"{'🥇' if grade == 'A' else '🥈'} {grade}"),
                         style={**_cell, "background": bg, "color": WHITE}),
                 html.Td(str(n),          style={**_cell, "background": bg, "color": TEXT}),
                 html.Td(f"{wr_g}%",      style={**_cell, "background": bg, "color": wcol, "fontWeight": "700"}),
