@@ -1159,6 +1159,25 @@ def parse_num(s) -> float:
     try:    return float(s) * mult
     except: return 0.0
 
+def _parse_price(s) -> float | None:
+    """Tolerant price parser for chat commands. Accepts '3.3', '$3.3', '3,3', '3.3$'.
+    Returns a positive float, or None if it can't be parsed."""
+    try:
+        v = float(str(s).replace("$", "").replace(",", ".").replace(" ", "").strip())
+        return v if v > 0 else None
+    except (ValueError, TypeError):
+        return None
+
+def _parse_qty(s) -> int | None:
+    """Tolerant share-quantity parser. Accepts '50', '50.0', '1,000', '50shares'.
+    Returns a positive int, or None if it can't be parsed."""
+    try:
+        cleaned = str(s).lower().replace(",", "").replace("shares", "").replace("share", "").strip()
+        v = int(float(cleaned))
+        return v if v > 0 else None
+    except (ValueError, TypeError):
+        return None
+
 def get_session() -> str | None:
     now = datetime.now(EASTERN)
     if now.weekday() >= 5:
@@ -2587,14 +2606,11 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
 
     elif cmd.startswith("buy "):
         parts = text.upper().split()
-        if len(parts) >= 3:
-            try:
-                sym_b = parts[1]
-                entry = float(parts[2])
-                qty   = int(parts[3]) if len(parts) >= 4 else None
-                add_position(uid, sym_b, entry, qty)
-            except ValueError:
-                send_to(uid, "❌ Format: BUY SYMBOL PRICE [SHARES]\nExamples:\n  BUY NNVC 1.75\n  BUY MASK 4.80 50")
+        entry = _parse_price(parts[2]) if len(parts) >= 3 else None
+        if len(parts) >= 3 and entry is not None:
+            sym_b = parts[1]
+            qty   = _parse_qty(parts[3]) if len(parts) >= 4 else None
+            add_position(uid, sym_b, entry, qty)
         else:
             send_to(uid, "❌ Format: BUY SYMBOL PRICE [SHARES]\nExamples:\n  BUY NNVC 1.75\n  BUY MASK 4.80 50")
 
@@ -2606,8 +2622,11 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
         else:
             try:
                 sym_a     = parts[1]
-                new_price = float(parts[2])
-                new_qty   = int(parts[3]) if len(parts) >= 4 else None
+                new_price = _parse_price(parts[2])
+                new_qty   = _parse_qty(parts[3]) if len(parts) >= 4 else None
+                if new_price is None:
+                    send_to(uid, "❌ Format: ADD SYMBOL PRICE [SHARES]\nExample: ADD AUUD 1.75 100")
+                    return
                 with _lock:
                     existing = portfolio.get(uid, {}).get(sym_a)
                 if not existing:
@@ -2645,8 +2664,14 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
         if len(parts) >= 2:
             sym = parts[1]
             # SELL NNVC [exit_price] [qty]
-            exit_price = float(parts[2]) if len(parts) >= 3 else None
-            qty_sell   = int(parts[3])   if len(parts) >= 4 else None
+            exit_price = qty_sell = None
+            if len(parts) >= 3:
+                exit_price = _parse_price(parts[2])
+                if exit_price is None:
+                    send_to(uid, "❌ Format: SELL SYMBOL [PRICE] [SHARES]\nExamples:\n  SELL NNVC\n  SELL NNVC 3.60\n  SELL NNVC 3.60 50")
+                    return
+            if len(parts) >= 4:
+                qty_sell = _parse_qty(parts[3])
             with _lock:
                 removed = portfolio.get(uid, {}).pop(sym, None)
                 if removed:
@@ -2718,8 +2743,10 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
             action  = parts[1]   # BUY or SELL
             sym_e   = parts[2]
             try:
-                new_price = float(parts[3])
-                new_qty   = int(parts[4]) if len(parts) >= 5 else None
+                new_price = _parse_price(parts[3])
+                new_qty   = _parse_qty(parts[4]) if len(parts) >= 5 else None
+                if new_price is None:
+                    raise ValueError("bad price")
 
                 if action == "BUY":
                     with _lock:
@@ -3690,10 +3717,10 @@ def col_label(col, lang="en"):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  DATABASE
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def q(sql: str) -> pd.DataFrame:
+def q(sql: str, params=None) -> pd.DataFrame:
     try:
         with sqlite3.connect(DB_PATH, timeout=5) as c:
-            return pd.read_sql(sql, c)
+            return pd.read_sql(sql, c, params=params)
     except Exception as e:
         print(f"[DB] {e}")
         return pd.DataFrame()
@@ -4532,6 +4559,31 @@ app = Dash(
 )
 server = app.server  # exposed for gunicorn / WSGI if needed
 
+# ── Server-side session auth ──────────────────────────────────────────────
+# The login identity lives in Flask's signed session cookie (tamper-proof),
+# NOT in the client-side dcc.Store. The Store is kept only as a render trigger;
+# its contents are never trusted. Without this, anyone could edit localStorage
+# to set is_admin=true / another chat_id and read every user's data.
+import secrets as _secrets
+from flask import session as _flask_session
+
+server.secret_key = os.environ.get("SECRET_KEY") or _secrets.token_hex(32)
+if not os.environ.get("SECRET_KEY"):
+    log.warning("[dashboard] SECRET_KEY env var not set — using a random key; "
+                "dashboard logins reset on every restart. Set SECRET_KEY to persist sessions.")
+
+def _session_auth():
+    """Trusted identity from the signed session cookie, or None if not logged in.
+    Returns {chat_id, name, is_admin}. NEVER read auth from the client Store."""
+    uid = _flask_session.get("uid")
+    if not uid:
+        return None
+    return {
+        "chat_id":  str(uid),
+        "name":     _flask_session.get("name", ""),
+        "is_admin": bool(_flask_session.get("is_admin", False)),
+    }
+
 # Speed: gzip every response (shrinks the multi-MB Plotly/JS bundles ~70%).
 # No-op if flask-compress isn't installed, so local runs never break.
 try:
@@ -4796,8 +4848,9 @@ def apply_theme(theme):
     Input("theme", "data"),
     prevent_initial_call=False,
 )
-def update_trades_content(filter_type, sel_day, sel_month, auth, lang, theme):
-    if not auth or not auth.get("chat_id"):
+def update_trades_content(filter_type, sel_day, sel_month, _auth_trigger, lang, theme):
+    auth = _session_auth()   # trust the signed cookie, never the client Store
+    if not auth:
         return no_update, no_update, no_update
     lang = lang if lang in TR else "en"
     _theme_ctx.value = "light" if theme == "light" else "dark"
@@ -4811,13 +4864,26 @@ def update_trades_content(filter_type, sel_day, sel_month, auth, lang, theme):
     day_style   = _DD if filter_type == "day"   else _DD_HIDE
     month_style = _DD if filter_type == "month" else _DD_HIDE
 
-    base_where   = f"t.chat_id = {uid}" if not is_admin else "1=1"
+    # Parameterized — values bound via ? placeholders, never string-interpolated.
+    params: list = []
+    if is_admin:
+        base_where = "1=1"
+    else:
+        base_where = "t.chat_id = ?"
+        params.append(uid)
+
     period_where = "1=1"
     if filter_type == "day" and sel_day:
-        period_where = f"DATE(t.trade_date) = '{sel_day}'"
+        period_where = "DATE(t.trade_date) = ?"
+        params.append(str(sel_day))
     elif filter_type == "month" and sel_month:
-        y, m = sel_month.split("-")
-        period_where = f"strftime('%Y', t.trade_date) = '{y}' AND strftime('%m', t.trade_date) = '{int(m):02d}'"
+        try:
+            y, m = str(sel_month).split("-")
+            period_where = ("strftime('%Y', t.trade_date) = ? "
+                            "AND strftime('%m', t.trade_date) = ?")
+            params.extend([y, f"{int(m):02d}"])
+        except (ValueError, TypeError):
+            period_where = "1=1"
 
     if is_admin:
         df = q(f"""
@@ -4825,13 +4891,13 @@ def update_trades_content(filter_type, sel_day, sel_month, auth, lang, theme):
             FROM trades t LEFT JOIN users u ON t.chat_id = u.chat_id
             WHERE ({base_where}) AND ({period_where})
             ORDER BY t.closed_at DESC
-        """)
+        """, params)
     else:
         df = q(f"""
             SELECT * FROM trades t
             WHERE ({base_where}) AND ({period_where})
             ORDER BY t.closed_at DESC
-        """)
+        """, params)
 
     return _render_trades_content(df, is_admin, lang), day_style, month_style
 
@@ -4852,8 +4918,9 @@ def update_trades_content(filter_type, sel_day, sel_month, auth, lang, theme):
     # page every cycle, making all charts flicker (disappear/redraw). Pages now
     # render only on navigation / login / language / theme change.
 )
-def route(pathname, auth, lang, theme):
-    if not auth or not auth.get("chat_id"):
+def route(pathname, _auth_trigger, lang, theme):
+    auth = _session_auth()   # trust the signed cookie, never the client Store
+    if not auth:
         return _SHOW_LOGIN, _HIDE, [], "", "", "", ""
     lang = lang if lang in TR else "en"
     _theme_ctx.value = "light" if theme == "light" else "dark"
@@ -4891,7 +4958,13 @@ def route(pathname, auth, lang, theme):
 def do_login(n_btn, n_enter, username, pin, lang):
     user = check_login(username or "", pin or "")
     if user:
-        return user, ""
+        # Store identity server-side in the signed session cookie.
+        _flask_session["uid"]      = user["chat_id"]
+        _flask_session["name"]     = user["name"]
+        _flask_session["is_admin"] = user["is_admin"]
+        _flask_session.permanent   = True
+        # The Store value is only a render trigger now — not trusted.
+        return {"ok": True}, ""
     return no_update, t("login_error", lang if lang in TR else "en")
 
 
@@ -4901,6 +4974,7 @@ def do_login(n_btn, n_enter, username, pin, lang):
     prevent_initial_call=True,
 )
 def do_logout(_):
+    _flask_session.clear()
     return {}
 
 
