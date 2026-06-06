@@ -4307,6 +4307,37 @@ def page_overview(auth, lang="en"):
     return html.Div([kpis, charts, recent])
 
 
+def _skip_bucket(reason: str) -> str:
+    """Group a free-text scan skip_reason into a tunable category, so the
+    diagnostics panel can show WHICH rule rejects the most candidates.
+    Order matters: specific phrases are matched before generic ones."""
+    r = (reason or "").lower()
+    if not r:                                          return "—"
+    if "out of range" in r:                            return "Price out of range"
+    if "thin liquidity" in r:                          return "Thin liquidity"
+    if "dying volume" in r:                            return "Dying volume"
+    if "change" in r and "<" in r:                     return "Change % too low"
+    if "vol " in r and "<" in r:                       return "Volume too low"
+    if "parabolic" in r:                               return "RSI parabolic (too hot)"
+    # Rule-9 reasons also contain the word "fading", so match them first.
+    if "ignition" in r or "rolling over" in r:         return "No ignition / rolling over"
+    if "fading" in r or "dumping" in r:                return "RSI fading"
+    if "rsi unknown" in r:                             return "RSI unknown + weak catalyst"
+    if "already ran" in r or "below day high" in r:    return "Already ran & dumped"
+    if "mfi" in r:                                     return "MFI exhausted"
+    if "obv" in r:                                     return "OBV distribution"
+    if "vwap" in r:                                    return "Over-extended vs VWAP"
+    if "micro-float" in r:                             return "Micro-float pump"
+    if "near peak" in r or "day range" in r:           return "Near day high"
+    if "no catalyst" in r or "catalyst" in r:          return "Weak / no catalyst"
+    if "nano-cap" in r:                                return "Nano-cap"
+    if "float" in r and ">" in r:                      return "Float too big"
+    if "mcap" in r:                                    return "Market cap out of range"
+    if r.startswith("ai:"):                            return "AI: pump verdict"
+    if "grade c" in r:                                 return "Grade C (low quality)"
+    return reason[:24]
+
+
 def page_insights(auth, lang="en"):
     """Pro insights: equity curve + trade stats, per-symbol leaderboard, alert funnel."""
     uid      = int(auth["chat_id"])
@@ -4455,7 +4486,75 @@ def page_insights(auth, lang="en"):
         card([sec(t("sec_grade_perf", lang)),   chart(fig_grade, 320)], mb="0"),
     ])
 
-    return html.Div([stats_block, leaderboard, funnel])
+    # ── 4. Filter diagnostics — is it too strict? ───────────
+    _cell = {"padding": "7px 12px", "borderBottom": f"1px solid {BORDER}", "fontSize": "12px"}
+    _th   = {"padding": "9px 12px", "background": BG, "color": MUTED, "fontSize": "10px",
+             "fontWeight": "700", "letterSpacing": "1px", "textTransform": "uppercase",
+             "borderBottom": f"2px solid {ACCENT}"}
+
+    # Win-rate by grade — only alerts that have been evaluated (have an outcome).
+    wr_rows = []
+    if alerted and "grade" in al.columns and "pct_after_alert" in al.columns:
+        ev = al.dropna(subset=["pct_after_alert"])
+        for grade in ["A", "B"]:
+            sub = ev[ev["grade"] == grade]
+            if len(sub):
+                wins = int((sub["pct_after_alert"] > 0).sum())
+                wr_rows.append((grade, len(sub), round(wins / len(sub) * 100),
+                                round(sub["pct_after_alert"].mean(), 1)))
+
+    if wr_rows:
+        head = html.Tr([html.Th(h, style=_th) for h in
+                        ["Grade", "Evaluated", "Win %", "Avg % after"]])
+        body = []
+        for i, (grade, n, wr_g, avg) in enumerate(wr_rows):
+            bg   = SURFACE if i % 2 == 0 else SURF2
+            wcol = GREEN if wr_g >= 50 else (YELLOW if wr_g >= 40 else RED)
+            acol = GREEN if avg >= 0 else RED
+            body.append(html.Tr([
+                html.Td(html.B(f"{'🅰️' if grade == 'A' else '🅱️'} {grade}"),
+                        style={**_cell, "background": bg, "color": WHITE}),
+                html.Td(str(n),          style={**_cell, "background": bg, "color": TEXT}),
+                html.Td(f"{wr_g}%",      style={**_cell, "background": bg, "color": wcol, "fontWeight": "700"}),
+                html.Td(f"{avg:+.1f}%",  style={**_cell, "background": bg, "color": acol, "fontWeight": "700"}),
+            ]))
+        wr_block = html.Div(style={"overflowX": "auto", "borderRadius": "8px",
+                                   "border": f"1px solid {BORDER}"},
+                            children=[html.Table([html.Thead(head), html.Tbody(body)],
+                                      style={"width": "100%", "borderCollapse": "collapse"})])
+    else:
+        wr_block = empty_msg("No evaluated alerts yet — win-rate fills in once "
+                             "alerts have outcomes (price checked after the alert).")
+
+    # Top skip reasons — what the filter rejects most.
+    fig_skip = go.Figure()
+    if scanned and "skip_reason" in scan.columns and "passed" in scan.columns:
+        sk = scan[(scan["passed"] == 0)].copy()
+        sk = sk[sk["skip_reason"].astype(str).str.strip() != ""]
+        if not sk.empty:
+            sk["bucket"] = sk["skip_reason"].astype(str).map(_skip_bucket)
+            top = (sk.groupby("bucket").size().reset_index(name="n")
+                     .sort_values("n", ascending=False).head(12))
+            fig_skip.add_trace(go.Bar(
+                y=top["bucket"], x=top["n"], orientation="h",
+                marker_color=YELLOW, text=top["n"], textposition="outside"))
+            fig_skip.update_layout(yaxis=dict(autorange="reversed"),
+                                   xaxis=dict(title="rejections"))
+
+    diagnostics = html.Div(className="charts-grid", style={"display": "grid",
+                            "gridTemplateColumns": "1fr 1fr", "gap": "12px",
+                            "marginBottom": "16px"}, children=[
+        card([sec("WIN-RATE BY GRADE"),
+              html.P("Does A actually beat B? If not, the point weights need tuning.",
+                     style={"color": MUTED, "fontSize": "11px", "margin": "0 0 12px 0"}),
+              wr_block], mb="0"),
+        card([sec("TOP SKIP REASONS"),
+              html.P("Which rule rejects most. A huge bar = possibly too strict.",
+                     style={"color": MUTED, "fontSize": "11px", "margin": "0 0 12px 0"}),
+              chart(fig_skip, 300)], mb="0"),
+    ])
+
+    return html.Div([stats_block, leaderboard, funnel, diagnostics])
 
 
 def page_alerts(auth, lang="en"):
