@@ -445,7 +445,7 @@ def db_log_trade(chat_id: str, symbol: str,
             qty_val = qty or 0
             pnl_d   = round((exit_price - entry) * qty_val, 2) if qty_val else None
             pnl_p   = round((exit_price - entry) / entry * 100, 4)
-            result  = "WIN" if pnl_p > 0 else "LOSS"
+            result  = "WIN" if pnl_p > 0 else ("FLAT" if pnl_p == 0 else "LOSS")
         conn.execute("""
             INSERT INTO trades
                 (chat_id, symbol, entry_price, exit_price, qty,
@@ -486,7 +486,7 @@ def db_update_last_trade(chat_id: str, symbol: str,
             qty_val = new_qty or 0
             pnl_d   = round((new_exit - new_entry) * qty_val, 2) if qty_val else None
             pnl_p   = round((new_exit - new_entry) / new_entry * 100, 4)
-            result  = "WIN" if pnl_p > 0 else "LOSS"
+            result  = "WIN" if pnl_p > 0 else ("FLAT" if pnl_p == 0 else "LOSS")
         conn.execute("""
             UPDATE trades
             SET entry_price=?, exit_price=?, qty=?,
@@ -4097,7 +4097,8 @@ def tbl(df: pd.DataFrame, lang="en", max_rows=100):
              "borderBottom": f"1px solid {BORDER}",
              "fontSize": "12px", "color": TEXT, "whiteSpace": "nowrap"}
         if col == "result":
-            s.update({"color": GREEN if val == "WIN" else RED, "fontWeight": "700"})
+            s.update({"color": GREEN if val == "WIN" else (MUTED if val == "FLAT" else RED),
+                      "fontWeight": "700"})
         elif col == "grade":
             s.update({"color": GREEN if val == "A" else ACCENT if val == "B" else MUTED,
                        "fontWeight": "700"})
@@ -4113,7 +4114,9 @@ def tbl(df: pd.DataFrame, lang="en", max_rows=100):
     def fmt(col, val):
         if val is None:              return "—"
         if hasattr(val, "strftime"): return str(val)[:16]
-        if col == "result":          return t("res_win", lang) if val == "WIN" else t("res_loss", lang)
+        if col == "result":          return ("FLAT" if val == "FLAT"
+                                              else t("res_win", lang) if val == "WIN"
+                                              else t("res_loss", lang))
         if col == "passed":          return t("val_pass", lang) if val else t("val_skip", lang)
         if col == "pnl_pct":
             try: return f"{float(val):+.2f}%"
@@ -4992,6 +4995,25 @@ app.index_string = """
         {%scripts%}
         {%renderer%}
     </footer>
+    <script>
+        // Plotly charts can render at 0 width when first revealed from a hidden
+        // container (login -> dashboard), so they look blank while tables show
+        // fine. Nudge Plotly to recompute size whenever the DOM changes.
+        (function () {
+            var timer = null;
+            function nudge() {
+                clearTimeout(timer);
+                timer = setTimeout(function () {
+                    window.dispatchEvent(new Event('resize'));
+                }, 150);
+            }
+            window.addEventListener('load', function () {
+                nudge();
+                new MutationObserver(nudge).observe(
+                    document.body, { childList: true, subtree: true });
+            });
+        })();
+    </script>
 </body>
 </html>
 """
