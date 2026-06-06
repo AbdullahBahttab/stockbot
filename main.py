@@ -2158,7 +2158,9 @@ def compute_grade(stock: dict, fv: dict) -> str:
       catalyst              — a genuine reason for the move
       entry position        — near day low (good) vs at the high (chasing)
       ignition              — the move is real & starting (VWAP/accel/vol/EMA)
-    A ≥ 9, B ≥ 6, else C.
+    A ≥ 8, B ≥ 5, else C. Thresholds stay low on purpose so ignition is pure
+    upside — it lifts a genuine fresh move, but its absence (e.g. pre-market
+    with few intraday bars) never drags a stock down.
     """
     rsi = fv.get("rsi")
     flt = fv.get("float_m")
@@ -2200,7 +2202,7 @@ def compute_grade(stock: dict, fv: dict) -> str:
         s = ign.get("score", 0)
         pts += 2 if s >= 3 else (1 if s >= 1 else 0)
 
-    return "A" if pts >= 9 else ("B" if pts >= 6 else "C")
+    return "A" if pts >= 8 else ("B" if pts >= 5 else "C")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -3261,16 +3263,17 @@ def passes_filters(stock: dict, fv: dict, f: dict) -> tuple:
     # 8. Extreme relative volume with no catalyst = coordinated buying
     if rv and rv > 50 and chg > 80 and cat_pts == 0:
         return False, f"RelVol {rv:.0f}x + {chg:.0f}% + no catalyst — unusual volume spike"
-    # 9. Ignition gate — a big move that isn't backed by a strong catalyst must
-    #    show the move is real & still firing (VWAP hold / accel / vol surge).
-    #    No ignition at all = extended or fading, not a fresh entry.
+    # 9. Ignition gate — only on big moves, and kept deliberately lenient:
+    #    - actively rolling over (price dropping hard over the last 25m) on a
+    #      non-strong catalyst → fade, reject.
+    #    - truly no catalyst AND zero ignition signals → nothing real behind it.
+    #    A neutral-catalyst stock that's merely consolidating is NOT rejected.
     ign = fv.get("ignition")
-    if ign and chg >= 50 and cat_pts < 2:
-        if ign.get("accel_pct", 0) <= -6:
+    if ign and chg >= 50:
+        if cat_pts < 2 and ign.get("accel_pct", 0) <= -6:
             return False, f"rolling over {ign['accel_pct']:.0f}% over last 25m — momentum fading"
-        if ign.get("score", 0) == 0:
-            return False, (f"{chg:.0f}% but no ignition (no VWAP hold / accel / vol surge) "
-                           f"— extended or fading, not a fresh move")
+        if cat_pts == 0 and ign.get("score", 0) == 0:
+            return False, f"{chg:.0f}% with no catalyst and no ignition — extended or fading"
 
     if flt and flt > f["max_float_m"]:    return False, f"float {flt:.1f}M > {f['max_float_m']:.0f}M"
     if mc  and mc  > f["max_mcap_m"]:     return False, f"mcap ${mc:.0f}M > ${f['max_mcap_m']:.0f}M"
