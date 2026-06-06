@@ -2312,13 +2312,6 @@ def range_bar(price, high, low) -> str:
     label = "🟢 Low (good entry)" if pos < 35 else ("🟡 Mid" if pos < 70 else "🔴 High — wait for dip")
     return f"{pos:.0f}%  {label}"
 
-def ignition_line(fv) -> str:
-    """One line showing why the move looks real & starting, or '' if no signal."""
-    ign = fv.get("ignition")
-    if not ign or not ign.get("tags"):
-        return ""
-    return "🚀 " + "  ·  ".join(ign["tags"]) + "\n"
-
 def gap_line(price, fv) -> str:
     """One-line gap from yesterday's close, or '' when prev close is unknown."""
     pc = fv.get("prev_close")
@@ -2347,7 +2340,6 @@ def build_alert_simple(stock: dict, fv: dict, session: str) -> str:
         f"Entry    ${entry_lo} – ${entry_hi}\n"
         f"Stop     ${tgt['stop']}   -{tgt['stop_pct']}%\n"
         f"{tgt['label']}\n"
-        f"{ignition_line(fv)}"
         f"📰 {cat_label}\n"
         f"{news_line}"
         f"{D}\n"
@@ -2425,7 +2417,6 @@ def build_alert(stock: dict, fv: dict, session: str) -> str:
         f"Entry    ${entry_lo} – ${entry_hi}\n"
         f"Stop     ${tgt['stop']}   -{tgt['stop_pct']}%\n"
         f"{tgt['label']}\n"
-        f"{ignition_line(fv)}"
         f"{ind_line}"
         f"📰 {cat_label}\n"
         f"{news_line}"
