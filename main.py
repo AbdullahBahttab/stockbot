@@ -622,6 +622,12 @@ MIN_PRICE       = 1.0
 MAX_PRICE       = 50.0
 SCAN_EVERY_MIN  = 2
 ALERT_COOLDOWN  = 1800    # seconds before same stock can re-alert
+
+# Alert outcome simulation — how a real trade on the alert would have gone.
+ALERT_T1_PCT    = 0.10    # first target  → WIN
+ALERT_T2_PCT    = 0.20    # second target → WIN (bigger)
+ALERT_STOP_PCT  = 0.07    # stop loss     → LOSS
+ALERT_OPEN_MIN  = 90      # minutes to let a trade work before marking it FLAT
 MOMENTUM_ALERTS = False   # separate "high-risk momentum" channel for big runners the
                           # strict filter rejects (unverified pumps). OFF by default —
                           # admin can enable live with /momentum on.
@@ -1973,6 +1979,76 @@ def fetch_price_live(symbol: str) -> float | None:
     except Exception:
         pass
     return None
+
+
+def fetch_intraday_bars(symbol: str, count: int = 240) -> list:
+    """m5 bars as (ts, high, low, close) tuples, oldest-first. For replaying a
+    trade after an alert. ts is unix seconds (UTC)."""
+    tid = fetch_webull_id(symbol)
+    if not tid:
+        return []
+    with _wb_semaphore:
+        try:
+            s = requests.Session()
+            s.headers.update(_wb_http.headers)
+            r = s.get(
+                "https://quotes-gw.webullfintech.com/api/quote/charts/query",
+                params={"tickerIds": tid, "type": "m5", "count": count},
+                timeout=8,
+            )
+            if r.status_code != 200:
+                return []
+            body = r.json()
+            if isinstance(body, list) and body and isinstance(body[0], dict):
+                data = body[0].get("data", [])
+            elif isinstance(body, dict):
+                data = body.get("data", [])
+            else:
+                data = []
+            bars = []
+            for c in data:
+                p = c.split(",") if isinstance(c, str) else c
+                if len(p) >= 5:
+                    try:
+                        # ts, open, close, high, low, ...
+                        bars.append((int(float(p[0])), float(p[3]),
+                                     float(p[4]), float(p[2])))
+                    except Exception:
+                        pass
+            bars.sort(key=lambda b: b[0])   # oldest-first
+            return bars
+        except Exception:
+            return []
+
+
+def simulate_trade_outcome(alert_price: float, alerted_ts: float, bars: list):
+    """
+    Replay the trade after the alert, first-touch:
+      T2 (+20%) or T1 (+10%) reached  → ("PASS", pct, label)  WIN
+      stop (-7%) reached first         → ("FAIL", -7, label)  LOSS
+      neither yet                      → ("OPEN", None, ...)
+    Same-bar ties resolve target-first — momentum alerts usually push up
+    before pulling back, and once T1 prints you'd have taken profit.
+    """
+    if not alert_price or alert_price <= 0:
+        return None
+    t1   = alert_price * (1 + ALERT_T1_PCT)
+    t2   = alert_price * (1 + ALERT_T2_PCT)
+    stop = alert_price * (1 - ALERT_STOP_PCT)
+    reached_t1 = False
+    for ts, hi, lo, _close in bars:
+        if ts < alerted_ts:
+            continue
+        if hi >= t2:
+            return ("PASS", round(ALERT_T2_PCT * 100, 1), f"T2 +{int(ALERT_T2_PCT*100)}%")
+        if hi >= t1:
+            reached_t1 = True
+            continue                       # lock in T1, keep scanning for T2
+        if lo <= stop and not reached_t1:
+            return ("FAIL", round(-ALERT_STOP_PCT * 100, 1), f"Stop -{int(ALERT_STOP_PCT*100)}%")
+    if reached_t1:
+        return ("PASS", round(ALERT_T1_PCT * 100, 1), f"T1 +{int(ALERT_T1_PCT*100)}%")
+    return ("OPEN", None, "no target hit")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -3627,56 +3703,55 @@ def reset_daily():
 
 def check_alert_performance():
     """
-    Run at 16:05 ET (market close + 5 min).
-    Fetches close prices for today's alerts, marks PASS/FAIL, sends summary.
+    Replay each of today's open alerts on the m5 bars and record the outcome:
+      WIN  → reached T1 (+10%) or T2 (+20%)
+      LOSS → hit the stop (-7%) first
+      FLAT → hit neither after ALERT_OPEN_MIN minutes
+    Scheduled every 20 min, so outcomes resolve as the move happens (no reliance
+    on an exact market-close time). Outcomes feed the dashboard win-rate panel.
     """
     if not DB_OK:
         return
-    alerts = db_get_todays_alerts()
+    alerts = db_get_todays_alerts()          # today's alerts with outcome still NULL
     if not alerts:
         return
 
-    log.info(f"[Performance] Checking {len(alerts)} alert(s) from today...")
-    results = []
+    import calendar
+    resolved = 0
     for a in alerts:
         sym         = a["symbol"]
         alert_price = float(a["alert_price"])
         grade       = a.get("grade", "")
-        session     = a.get("session", "")
-        close       = fetch_price_live(sym)
-        if not close:
+        # alerted_at is a UTC string from SQLite datetime('now'); bar ts are UTC epoch.
+        try:
+            dt = datetime.strptime(str(a["alerted_at"])[:19], "%Y-%m-%d %H:%M:%S")
+            alerted_ts = calendar.timegm(dt.timetuple())
+        except Exception:
             continue
-        pct     = round((close - alert_price) / alert_price * 100, 2)
-        outcome = "PASS" if pct >= 0 else "FAIL"
-        db_update_alert_outcome(a["id"], close, pct, outcome)
-        results.append({"sym": sym, "grade": grade, "session": session,
-                         "alert": alert_price, "close": close,
-                         "pct": pct, "outcome": outcome})
 
-    if not results:
-        return
+        bars = fetch_intraday_bars(sym)
+        sim  = simulate_trade_outcome(alert_price, alerted_ts, bars) if bars else None
+        if not sim:
+            continue
+        outcome, pct, label = sim
 
-    passed  = [r for r in results if r["outcome"] == "PASS"]
-    failed  = [r for r in results if r["outcome"] == "FAIL"]
-    win_rate = round(len(passed) / len(results) * 100) if results else 0
-    today_s  = datetime.now(EASTERN).strftime("%b %d, %Y")
+        if outcome in ("PASS", "FAIL"):
+            implied = round(alert_price * (1 + pct / 100.0), 4)   # T1/T2/stop price
+            db_update_alert_outcome(a["id"], implied, pct, outcome)
+            resolved += 1
+            log.info(f"[Performance] {sym} [{grade}] → {outcome} ({label})")
+        else:
+            # No target hit yet — give it ALERT_OPEN_MIN to work, then close FLAT.
+            age_min = (time.time() - alerted_ts) / 60.0
+            if age_min >= ALERT_OPEN_MIN:
+                last  = bars[-1][3] if bars else None
+                pct_c = round((last - alert_price) / alert_price * 100, 2) if last else 0.0
+                db_update_alert_outcome(a["id"], last or alert_price, pct_c, "FLAT")
+                resolved += 1
+                log.info(f"[Performance] {sym} [{grade}] → FLAT ({pct_c:+.1f}% after {age_min:.0f}m)")
 
-    lines = [
-        f"📊 <b>Daily Alert Report — {today_s}</b>\n",
-        f"Total: {len(results)}  |  ✅ {len(passed)} Pass  |  ❌ {len(failed)} Fail  |  Win: {win_rate}%\n",
-    ]
-    if passed:
-        lines.append("✅ <b>PASSED:</b>")
-        for r in passed:
-            lines.append(f"  <b>{r['sym']}</b> [{r['grade']}]  ${r['alert']:.2f} → ${r['close']:.2f}  <b>({r['pct']:+.1f}%)</b>")
-    if failed:
-        lines.append("\n❌ <b>FAILED:</b>")
-        for r in failed:
-            lines.append(f"  <b>{r['sym']}</b> [{r['grade']}]  ${r['alert']:.2f} → ${r['close']:.2f}  ({r['pct']:+.1f}%)")
-
-    # Daily report is no longer sent to anyone — outcomes are still recorded
-    # above so the dashboard win-rate keeps working.
-    log.info(f"[Performance] Outcomes recorded — {len(passed)}/{len(results)} passed ({win_rate}%) (no broadcast)")
+    if resolved:
+        log.info(f"[Performance] Resolved {resolved} alert outcome(s)")
 
 
 def main():
@@ -3719,7 +3794,7 @@ def main():
     schedule.every(SCAN_EVERY_MIN).minutes.do(run_scan)
     schedule.every(15).minutes.do(reset_stale_cooldowns)
     schedule.every().day.at("09:25").do(reset_daily)        # ET — clear yesterday's alerts before open
-    schedule.every().day.at("16:05").do(check_alert_performance)
+    schedule.every(20).minutes.do(check_alert_performance)   # resolve T1/T2/stop through the day
     while True:
         schedule.run_pending()
         time.sleep(20)
@@ -4497,14 +4572,16 @@ def page_insights(auth, lang="en"):
 
     # Win-rate by grade — only alerts that have been evaluated (have an outcome).
     wr_rows = []
-    if alerted and "grade" in al.columns and "pct_after_alert" in al.columns:
-        ev = al.dropna(subset=["pct_after_alert"])
+    if alerted and "grade" in al.columns and "outcome" in al.columns:
+        ev = al[al["outcome"].isin(["PASS", "FAIL"])]   # resolved win/loss only
         for grade in ["A", "B"]:
             sub = ev[ev["grade"] == grade]
             if len(sub):
-                wins = int((sub["pct_after_alert"] > 0).sum())
-                wr_rows.append((grade, len(sub), round(wins / len(sub) * 100),
-                                round(sub["pct_after_alert"].mean(), 1)))
+                wins = int((sub["outcome"] == "PASS").sum())
+                avgp = (round(sub["pct_after_alert"].dropna().mean(), 1)
+                        if "pct_after_alert" in sub.columns and sub["pct_after_alert"].notna().any()
+                        else 0.0)
+                wr_rows.append((grade, len(sub), round(wins / len(sub) * 100), avgp))
 
     if wr_rows:
         head = html.Tr([html.Th(h, style=_th) for h in
@@ -4566,7 +4643,7 @@ def page_alerts(auth, lang="en"):
     today_df = df[df["alerted_at"].astype(str).str[:10] == today_s()] if total else pd.DataFrame()
     today_n  = len(today_df)
     avg_ch   = round(df["change_pct"].mean(), 1) if total and "change_pct" in df.columns else 0
-    perf_df  = df[df["outcome"].notna()] if "outcome" in df.columns else pd.DataFrame()
+    perf_df  = df[df["outcome"].isin(["PASS", "FAIL"])] if "outcome" in df.columns else pd.DataFrame()
     p_total  = len(perf_df)
     p_pass   = int((perf_df["outcome"] == "PASS").sum()) if p_total else 0
     p_rate   = round(p_pass / p_total * 100, 1) if p_total else 0
@@ -4625,6 +4702,10 @@ def page_alerts(auth, lang="en"):
                     badge  = html.Span(t("fail", lang), style={"background": RED, "color": WHITE,
                         "borderRadius": "4px", "padding": "2px 8px", "fontSize": "11px", "fontWeight": "700"})
                     pct_el = html.Span(f"{pct_val:+.1f}%" if pct_val is not None else "", style={"color": RED})
+                elif outcome == "FLAT":
+                    badge  = html.Span("FLAT", style={"background": MUTED, "color": "#000",
+                        "borderRadius": "4px", "padding": "2px 8px", "fontSize": "11px", "fontWeight": "700"})
+                    pct_el = html.Span(f"{pct_val:+.1f}%" if pct_val is not None else "", style={"color": MUTED})
                 else:
                     badge  = html.Span(t("pending", lang), style={"background": YELLOW, "color": "#000",
                         "borderRadius": "4px", "padding": "2px 8px", "fontSize": "11px", "fontWeight": "700"})
