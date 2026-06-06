@@ -3218,6 +3218,7 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
             "/untrack NNVC → remove from tracked\n"
             "/setpin 1234  → change your dashboard PIN\n"
             "/claude       → Claude AI status\n\n"
+            "<b>Grades:</b>  🥇 A = strong  ·  🥈 B = good  ·  ⚠️ C = not alerted\n\n"
             "📘 /guide  → buy/sell commands &amp; grades\n"
             "⚠️ /terms  → risk disclaimer\n\n"
             "<i>The bot is NOT responsible for any losses. See /terms.</i>\n"
