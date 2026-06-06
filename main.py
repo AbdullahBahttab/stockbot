@@ -1161,6 +1161,48 @@ def get_updates(offset: int) -> list:
         pass
     return []
 
+def fetch_chat_info(uid: str) -> tuple:
+    """Look up a user's current first_name + @username via Telegram getChat.
+    Works for anyone who has ever started the bot — no need to wait for them
+    to send a message. Returns (name, username); either may be '' if unknown."""
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/getChat"
+    try:
+        r = requests.get(url, params={"chat_id": str(uid)}, timeout=8)
+        if r.status_code == 200:
+            res = r.json().get("result", {})
+            return (res.get("first_name") or res.get("title") or "",
+                    res.get("username") or "")
+    except Exception as e:
+        log.debug(f"getChat({uid}) failed: {e}")
+    return ("", "")
+
+def refresh_user_info() -> int:
+    """Fill in name/@username for any user missing them, via getChat.
+    Returns the number of records updated."""
+    updated = 0
+    for uid in list(users.keys()):
+        u = users.get(uid, {})
+        has_name  = u.get("name") and str(u.get("name")) != str(uid)
+        has_uname = bool(u.get("username"))
+        if has_name and has_uname:
+            continue   # already complete — skip the network call
+        name, uname = fetch_chat_info(uid)
+        with _lock:
+            if uid not in users:
+                continue
+            changed = False
+            if name and str(users[uid].get("name") or "") in ("", str(uid)):
+                users[uid]["name"] = name
+                changed = True
+            if uname and users[uid].get("username") != uname:
+                users[uid]["username"] = uname
+                changed = True
+        if changed:
+            updated += 1
+    if updated:
+        save_users()
+    return updated
+
 
 # ═══════════════════════════════════════════════════════════════
 #  HELPERS
@@ -2517,11 +2559,12 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
         if not is_admin(uid):
             send_to(uid, "❌ Admin only command.")
             return
+        refresh_user_info()   # pull names/@usernames via getChat — no waiting
         def _is_adm(i, u):
             return i == ADMIN_ID or u.get("is_admin")
         def _disp_name(i, u):
             nm = u.get("name") or i
-            return "❓ (no name yet — must message the bot)" if str(nm) == str(i) else nm
+            return "❓ (never started the bot)" if str(nm) == str(i) else nm
         active   = sorted(
             [(i, u) for i, u in users.items() if u.get("active")],
             key=lambda x: (0 if _is_adm(*x) else 1, x[1].get("added", ""))
