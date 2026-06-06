@@ -1074,7 +1074,10 @@ def save_portfolio():
         log.error(f"Save portfolio error: {e}")
 
 def is_admin(uid: str) -> bool:
-    return str(uid) == ADMIN_ID
+    uid = str(uid)
+    if uid == ADMIN_ID:          # primary admin — always, can't be revoked
+        return True
+    return bool(users.get(uid, {}).get("is_admin", False))
 
 def is_allowed(uid: str) -> bool:
     uid = str(uid)
@@ -1103,6 +1106,21 @@ def remove_user(uid: str) -> bool:
         save_users()
         return True
     return False
+
+def set_admin(uid: str, make: bool) -> bool:
+    """Grant/revoke admin on a user. Primary ADMIN_ID can't be changed.
+    Returns False if the user is unknown or is the primary admin."""
+    uid = str(uid)
+    if uid == ADMIN_ID:
+        return False
+    with _lock:
+        if uid not in users:
+            return False
+        users[uid]["is_admin"] = make
+        if make:
+            users[uid]["active"] = True
+    save_users()
+    return True
 
 def get_active_users() -> list[str]:
     return [uid for uid, u in users.items() if u.get("active", False)]
@@ -2457,24 +2475,74 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
         else:
             send_to(uid, f"❌ User {target} not found or is admin.")
 
+    elif cmd.startswith("/makeadmin"):
+        if not is_admin(uid):
+            send_to(uid, "❌ Admin only command.")
+            return
+        parts = text.split()
+        if len(parts) < 2:
+            send_to(uid, "Usage: /makeadmin 123456789\n\nSee IDs with /users")
+            return
+        target = parts[1].strip()
+        if target == ADMIN_ID:
+            send_to(uid, "✅ That user is already the primary admin.")
+        elif target not in users:
+            send_to(uid, f"❌ User {target} not found. They must /start the bot and be approved first.")
+        elif set_admin(target, True):
+            tname = users.get(target, {}).get("name") or target
+            send_to(uid, f"👑 <b>{tname}</b> (<code>{target}</code>) is now an admin.")
+            send_to(target, "👑 <b>You are now an admin.</b>\nYou can manage users: /users, /adduser, /removeuser.")
+        else:
+            send_to(uid, f"❌ Could not promote {target}.")
+
+    elif cmd.startswith("/removeadmin"):
+        if not is_admin(uid):
+            send_to(uid, "❌ Admin only command.")
+            return
+        parts = text.split()
+        if len(parts) < 2:
+            send_to(uid, "Usage: /removeadmin 123456789")
+            return
+        target = parts[1].strip()
+        if target == ADMIN_ID:
+            send_to(uid, "❌ The primary admin can't be removed.")
+        elif set_admin(target, False):
+            tname = users.get(target, {}).get("name") or target
+            send_to(uid, f"✅ <b>{tname}</b> (<code>{target}</code>) is no longer an admin.")
+            send_to(target, "ℹ️ Your admin access has been removed.")
+        else:
+            send_to(uid, f"❌ User {target} not found or is not an admin.")
+
     elif cmd == "/users":
         if not is_admin(uid):
             send_to(uid, "❌ Admin only command.")
             return
+        def _is_adm(i, u):
+            return i == ADMIN_ID or u.get("is_admin")
+        def _disp_name(i, u):
+            nm = u.get("name") or i
+            return "❓ (no name yet — must message the bot)" if str(nm) == str(i) else nm
         active   = sorted(
             [(i, u) for i, u in users.items() if u.get("active")],
-            key=lambda x: (0 if x[1].get("is_admin") else 1, x[1].get("added", ""))
+            key=lambda x: (0 if _is_adm(*x) else 1, x[1].get("added", ""))
         )
         inactive = [(i, u) for i, u in users.items() if not u.get("active")]
         lines    = [f"👥 <b>Users ({len(active)} active)</b>\n"]
         for n, (i, u) in enumerate(active, 1):
-            tag   = " 👑" if u.get("is_admin") else ""
+            tag   = " 👑" if _is_adm(i, u) else ""
             uname = f"@{u['username']}" if u.get("username") else ""
-            lines.append(f"{n}. {u['name']} {uname} — <code>{i}</code>{tag}  (added {u.get('added','')})")
+            lines.append(f"{n}. <b>{_disp_name(i, u)}</b> {uname} — <code>{i}</code>{tag}")
         if inactive:
-            lines.append(f"\n🚫 Inactive ({len(inactive)})")
+            lines.append(f"\n🚫 <b>Inactive ({len(inactive)})</b>")
             for i, u in inactive:
-                lines.append(f"• {u['name']} — <code>{i}</code>")
+                lines.append(f"• {_disp_name(i, u)} — <code>{i}</code>")
+        lines.append(
+            "\n<b>Manage</b> (tap an ID to copy):\n"
+            "/adduser ID      → approve\n"
+            "/removeuser ID   → remove\n"
+            "/makeadmin ID    → grant admin 👑\n"
+            "/removeadmin ID  → revoke admin"
+        )
         send_to(uid, "\n".join(lines))
 
     elif cmd.startswith("/track"):
@@ -2881,10 +2949,12 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
 
     elif cmd in ("/help", "/start"):
         admin_section = (
-            "\n\n<b>Admin (you only):</b>\n"
+            "\n\n<b>Admin:</b>\n"
+            "/users                → list &amp; manage users\n"
             "/adduser 123456789    → approve user\n"
             "/removeuser 123456789 → remove user\n"
-            "/users                → list all users\n"
+            "/makeadmin 123456789  → grant admin 👑\n"
+            "/removeadmin 12345    → revoke admin\n"
             "/momentum on|off      → toggle momentum channel"
         ) if is_admin(uid) else ""
         send_to(uid,
