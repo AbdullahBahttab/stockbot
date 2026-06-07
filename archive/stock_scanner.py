@@ -857,7 +857,8 @@ def fetch_webull(symbol: str) -> dict | None:
                 low      = sf(q.get("pLow"))   or sf(q.get("low"))
                 vol      = sf(q.get("pVolume")) or sf(q.get("volume"))
             else:
-                price   = sf(q.get("close"))
+                # market closed — show last extended-hours print if Webull still has one
+                price   = sf(q.get("pPrice")) or sf(q.get("close"))
                 high    = sf(q.get("high"))
                 low     = sf(q.get("low"))
                 vol     = sf(q.get("volume"))
@@ -1047,7 +1048,10 @@ def fetch_yahoo(symbol: str) -> dict | None:
         elif session == "AFTER":
             price = meta.get("postMarketPrice")
         else:
-            price = meta.get("regularMarketPrice")
+            # market closed — prefer most recent extended-hours print
+            price = (meta.get("postMarketPrice")
+                     or meta.get("preMarketPrice")
+                     or meta.get("regularMarketPrice"))
 
         return {
             "price": price,
