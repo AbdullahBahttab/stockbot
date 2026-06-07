@@ -1173,6 +1173,21 @@ def send_to(uid: str, text: str, reply_markup=None) -> bool:
         log.warning(f"send_to({uid}) failed: {e}")
         return False
 
+def send_document(uid: str, filepath: str, caption: str = "") -> bool:
+    """Upload a file to a Telegram chat — used for DB/state backups."""
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
+    try:
+        with open(filepath, "rb") as fh:
+            files = {"document": (os.path.basename(filepath), fh)}
+            data  = {"chat_id": str(uid)}
+            if caption:
+                data["caption"] = caption
+            r = requests.post(url, data=data, files=files, timeout=60)
+            return r.status_code == 200
+    except Exception as e:
+        log.warning(f"send_document({uid}, {filepath}) failed: {e}")
+        return False
+
 def broadcast(text: str):
     for uid in get_active_users():
         send_to(uid, text)
@@ -2905,6 +2920,25 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
             f"Active users    : {n_users}"
         )
 
+    elif cmd == "/backup":
+        if not is_admin(uid):
+            send_to(uid, "❌ Admin only command.")
+            return
+        send_to(uid, "📦 Preparing backup...")
+        # Flush WAL so the .db file on disk has every recent write before we send it
+        try:
+            with sqlite3.connect(DB_PATH, timeout=10) as c:
+                c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except Exception as e:
+            log.warning(f"backup checkpoint failed: {e}")
+        ok = send_document(uid, DB_PATH, caption=f"🗄️ stockbot.db backup\n<code>{DB_PATH}</code>")
+        # Also send JSON state files if present (legacy fallback caches)
+        for fp in (USERS_FILE, PORTFOLIO_FILE, WATCHLIST_FILE, ALERTED_FILE, TRACKED_FILE):
+            if os.path.exists(fp):
+                send_document(uid, fp)
+        send_to(uid, "✅ Backup sent — save these files." if ok
+                     else "❌ Backup failed — check logs.")
+
     elif cmd.startswith("/momentum"):
         if not is_admin(uid):
             send_to(uid, "❌ Admin only command.")
@@ -3244,7 +3278,8 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
             "/removeuser 123456789 → remove user\n"
             "/makeadmin 123456789  → grant admin 👑\n"
             "/removeadmin 12345    → revoke admin\n"
-            "/momentum on|off      → toggle momentum channel"
+            "/momentum on|off      → toggle momentum channel\n"
+            "/backup               → send DB + state files to you 🗄️"
         ) if is_admin(uid) else ""
         send_to(uid,
             "📖 <b>Commands</b>\n\n"
