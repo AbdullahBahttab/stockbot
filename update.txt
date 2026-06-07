@@ -1,0 +1,16 @@
+Here are the most useful upgrades left to do, ranked by impact for scalp trading:
+
+  High impact:
+  1. Morning briefing at 9:25 AM EDT (4:25 PM KSA) — pre-market top movers summary before the bell opens, so you're ready
+  2. Gap up % in alerts — show how much stock gapped up from yesterday's close (Webull already returns preClose, just not displayed)
+  3. Time-based exit warning — if a position is open 2+ hours with no T1 hit, send a warning (scalp rule: don't hold losers)
+  4. Trailing stop after T1 — once T1 hits, automatically trail stop 5–7% below current price instead of fixed breakeven
+
+  Medium impact:
+  5. /alert SYMBOL PRICE — set a custom price alert (e.g., ALERT NNVC 2.00 → bot pings you when it hits)
+  6. 52-week high flag — if stock is within 10% of 52-week high, add a breakout note in the alert
+  7. /gainers command — show raw top 10 gainers right now with no filters (so you can see the full list manually)
+
+  Nice to have:
+  8. Volume surge on watchlist — if a stock already alerted starts surging in volume again (second wave), re-alert
+  9. Pre-market briefing clears at open — reset watchlist log at 9:30 AM so OPEN session starts fresh
