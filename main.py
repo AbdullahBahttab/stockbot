@@ -650,10 +650,10 @@ SCAN_EVERY_MIN  = 2
 ALERT_COOLDOWN  = 1800    # seconds before same stock can re-alert
 
 # Alert outcome simulation — how a real trade on the alert would have gone.
-ALERT_T1_PCT    = 0.10    # first target  → WIN
-ALERT_T2_PCT    = 0.20    # second target → WIN (bigger)
-ALERT_STOP_PCT  = 0.07    # stop loss     → LOSS
-ALERT_OPEN_MIN  = 90      # minutes to let a trade work before marking it FLAT
+ALERT_T1_PCT    = 0.05    # first target  → PASS (+5% within the window)
+ALERT_T2_PCT    = 0.10    # second target → PASS (+10%, bigger)
+ALERT_STOP_PCT  = 0.07    # stop loss     → FAIL
+ALERT_OPEN_MIN  = 30      # minutes to hit +5%; no target hit by then → FAIL
 MOMENTUM_ALERTS = False   # separate "high-risk momentum" channel for big runners the
                           # strict filter rejects (unverified pumps). OFF by default —
                           # admin can enable live with /momentum on.
@@ -2132,10 +2132,13 @@ def simulate_trade_outcome(alert_price: float, alerted_ts: float, bars: list):
     t1   = alert_price * (1 + ALERT_T1_PCT)
     t2   = alert_price * (1 + ALERT_T2_PCT)
     stop = alert_price * (1 - ALERT_STOP_PCT)
+    window_end = alerted_ts + ALERT_OPEN_MIN * 60   # only count moves within the window
     reached_t1 = False
     for ts, hi, lo, _close in bars:
         if ts < alerted_ts:
             continue
+        if ts > window_end:
+            break                          # past the target window — stop checking
         if hi >= t2:
             return ("PASS", round(ALERT_T2_PCT * 100, 1), f"T2 +{int(ALERT_T2_PCT*100)}%")
         if hi >= t1:
@@ -2587,6 +2590,8 @@ def check_portfolio():
                 )
                 with _lock:
                     portfolio.get(uid, {}).pop(sym, None)
+                if DB_OK:
+                    db_remove_position(uid, sym)   # also drop from DB, else it reloads on restart and re-fires the stop
                 save_portfolio()
                 time.sleep(0.3)
                 continue
@@ -3895,9 +3900,10 @@ def check_alert_performance():
             if age_min >= ALERT_OPEN_MIN:
                 last  = bars[-1][3] if bars else None
                 pct_c = round((last - alert_price) / alert_price * 100, 2) if last else 0.0
-                db_update_alert_outcome(a["id"], last or alert_price, pct_c, "FLAT")
+                # No +5% within the 30-min window → the alert FAILED (user's definition).
+                db_update_alert_outcome(a["id"], last or alert_price, pct_c, "FAIL")
                 resolved += 1
-                log.info(f"[Performance] {sym} [{grade}] → FLAT ({pct_c:+.1f}% after {age_min:.0f}m)")
+                log.info(f"[Performance] {sym} [{grade}] → FAIL (no +5% target, {pct_c:+.1f}% after {age_min:.0f}m)")
 
     if resolved:
         log.info(f"[Performance] Resolved {resolved} alert outcome(s)")
