@@ -3372,6 +3372,17 @@ def passes_filters(stock: dict, fv: dict, f: dict) -> tuple:
     obv       = fv.get("obv_trend", "→")
     pos       = (p - l) / (h - l) if (h and l and h != l) else None
 
+    # ── REQUIRE confirmed inflow + volume surge ──────────────
+    # Only alert when money is actively flowing IN (OBV rising) AND volume is
+    # surging — catches the move while it's starting, not after it ran & dumped.
+    # ("sure inflow + sure volume". Far fewer alerts; needs live intraday data,
+    #  so works mainly in the OPEN session.)
+    ign_vs = (fv.get("ignition") or {}).get("vol_surge", 0)
+    if obv != "↑":
+        return False, "no inflow — OBV not rising (need money flowing in)"
+    if ign_vs < 2 and not (rv and rv >= 3):
+        return False, f"no volume surge (15m/30m {ign_vs}x, RelVol {rv}) — wait for volume to start"
+
     # ── Already ran and dumped today ─────────────────────────
     if h and h > 0 and p < h * 0.75:
         return False, f"${p:.2f} is {((h-p)/h*100):.0f}% below day high ${h:.2f} — already ran and dumped"
