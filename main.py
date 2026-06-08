@@ -657,6 +657,9 @@ ALERT_OPEN_MIN  = 90      # minutes to let a trade work before marking it FLAT
 MOMENTUM_ALERTS = False   # separate "high-risk momentum" channel for big runners the
                           # strict filter rejects (unverified pumps). OFF by default —
                           # admin can enable live with /momentum on.
+INFLOW_REQUIRED = False   # when ON, only alert stocks with confirmed inflow (OBV↑) +
+                          # volume surge — strict/high-quality. OFF = simple/more stocks.
+                          # Toggle live with /inflow on|off.
 MOMENTUM_MIN_FROM_HIGH = 0.50  # skip if price has collapsed below this fraction of day high
 SCAN_WORKERS    = 10      # stocks fetched in parallel
 MAX_CANDIDATES  = 40      # max stocks enriched per scan (screener can return many)
@@ -1179,6 +1182,21 @@ def send_to(uid: str, text: str, reply_markup=None) -> bool:
         log.warning(f"send_to({uid}) failed: {e}")
         return False
 
+def send_document(uid: str, filepath: str, caption: str = "") -> bool:
+    """Upload a file to a Telegram chat — used for DB/state backups."""
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
+    try:
+        with open(filepath, "rb") as fh:
+            files = {"document": (os.path.basename(filepath), fh)}
+            data  = {"chat_id": str(uid)}
+            if caption:
+                data["caption"] = caption
+            r = requests.post(url, data=data, files=files, timeout=60)
+            return r.status_code == 200
+    except Exception as e:
+        log.warning(f"send_document({uid}, {filepath}) failed: {e}")
+        return False
+
 def broadcast(text: str):
     for uid in get_active_users():
         send_to(uid, text)
@@ -1652,7 +1670,8 @@ def fetch_webull(symbol: str) -> dict | None:
                 low      = sf(q.get("pLow"))   or sf(q.get("low"))
                 vol      = sf(q.get("pVolume")) or sf(q.get("volume"))
             else:
-                price   = sf(q.get("close"))
+                # market closed — show last extended-hours print if Webull still has one
+                price   = sf(q.get("pPrice")) or sf(q.get("close"))
                 high    = sf(q.get("high"))
                 low     = sf(q.get("low"))
                 vol     = sf(q.get("volume"))
@@ -1848,7 +1867,10 @@ def fetch_yahoo(symbol: str) -> dict | None:
         elif session == "AFTER":
             price = meta.get("postMarketPrice")
         else:
-            price = meta.get("regularMarketPrice")
+            # market closed — prefer most recent extended-hours print
+            price = (meta.get("postMarketPrice")
+                     or meta.get("preMarketPrice")
+                     or meta.get("regularMarketPrice"))
 
         return {
             "price": price,
@@ -2591,7 +2613,8 @@ def check_portfolio():
 
             # ── RSI / Volume exit signals ─────────────────────
             rsi_danger = rsi is not None and rsi > 75
-            vol_danger = rel_vol is not None and rel_vol < 2.0
+            # RelVol ~0 means missing/pre-market data, NOT dying volume — don't warn on it
+            vol_danger = rel_vol is not None and 0.1 <= rel_vol < 2.0
 
             if rsi_danger and vol_danger and not pos.get("exit_warned"):
                 send_to(uid,
@@ -2707,7 +2730,7 @@ def _account_box(uid: str) -> str:
 
 
 def handle_command(uid: str, text: str, sender_name: str = "", sender_username: str = ""):
-    global MOMENTUM_ALERTS
+    global MOMENTUM_ALERTS, INFLOW_REQUIRED
     uid = str(uid)
     cmd = text.strip().lower()
 
@@ -2918,6 +2941,40 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
             f"Stocks alerted  : {n_alert}\n"
             f"Momentum chan.  : {'⚡ ON' if MOMENTUM_ALERTS else 'OFF'}\n"
             f"Active users    : {n_users}"
+        )
+
+    elif cmd == "/backup":
+        if not is_admin(uid):
+            send_to(uid, "❌ Admin only command.")
+            return
+        send_to(uid, "📦 Preparing backup...")
+        try:
+            with sqlite3.connect(DB_PATH, timeout=10) as c:
+                c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except Exception as e:
+            log.warning(f"backup checkpoint failed: {e}")
+        ok = send_document(uid, DB_PATH, caption=f"🗄️ stockbot.db backup\n<code>{DB_PATH}</code>")
+        for fp in (USERS_FILE, PORTFOLIO_FILE, WATCHLIST_FILE, ALERTED_FILE, TRACKED_FILE):
+            if os.path.exists(fp):
+                send_document(uid, fp)
+        send_to(uid, "✅ Backup sent — save these files." if ok else "❌ Backup failed — check logs.")
+
+    elif cmd.startswith("/inflow"):
+        if not is_admin(uid):
+            send_to(uid, "❌ Admin only command.")
+            return
+        parts = text.strip().split()
+        if len(parts) >= 2 and parts[1].lower() in ("on", "off"):
+            INFLOW_REQUIRED = (parts[1].lower() == "on")
+        else:
+            INFLOW_REQUIRED = not INFLOW_REQUIRED
+        send_to(uid,
+            f"💧 <b>Inflow filter: {'ON' if INFLOW_REQUIRED else 'OFF'}</b>\n\n"
+            + ("Only stocks with confirmed money inflow (OBV↑) + volume surge, caught "
+               "earlier in the move — fewer but higher-conviction."
+               if INFLOW_REQUIRED else
+               "Simple mode — more stocks, standard filters, no inflow requirement.")
+            + "\n\nToggle: /inflow on  |  /inflow off"
         )
 
     elif cmd.startswith("/momentum"):
@@ -3254,7 +3311,9 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
             "/removeuser 123456789 → remove user\n"
             "/makeadmin 123456789  → grant admin 👑\n"
             "/removeadmin 12345    → revoke admin\n"
-            "/momentum on|off      → toggle momentum channel"
+            "/momentum on|off      → toggle momentum channel\n"
+            "/inflow on|off        → require inflow+volume, catch earlier 💧\n"
+            "/backup               → send DB + state files to you 🗄️"
         ) if is_admin(uid) else ""
         send_to(uid,
             "📖 <b>Commands</b>\n\n"
@@ -3372,16 +3431,16 @@ def passes_filters(stock: dict, fv: dict, f: dict) -> tuple:
     obv       = fv.get("obv_trend", "→")
     pos       = (p - l) / (h - l) if (h and l and h != l) else None
 
-    # ── REQUIRE confirmed inflow + volume surge ──────────────
-    # Only alert when money is actively flowing IN (OBV rising) AND volume is
-    # surging — catches the move while it's starting, not after it ran & dumped.
-    # ("sure inflow + sure volume". Far fewer alerts; needs live intraday data,
-    #  so works mainly in the OPEN session.)
-    ign_vs = (fv.get("ignition") or {}).get("vol_surge", 0)
-    if obv != "↑":
-        return False, "no inflow — OBV not rising (need money flowing in)"
-    if ign_vs < 2 and not (rv and rv >= 3):
-        return False, f"no volume surge (15m/30m {ign_vs}x, RelVol {rv}) — wait for volume to start"
+    # ── Optional: REQUIRE confirmed inflow + volume surge (toggle /inflow) ──
+    # When INFLOW_REQUIRED is ON, only alert when money is actively flowing IN
+    # (OBV rising) AND volume is surging — high-conviction "sure inflow + sure
+    # volume". When OFF (default), the bot stays simple and surfaces more stocks.
+    if INFLOW_REQUIRED:
+        ign_vs = (fv.get("ignition") or {}).get("vol_surge", 0)
+        if obv != "↑":
+            return False, "no inflow — OBV not rising (need money flowing in)"
+        if ign_vs < 2 and not (rv and rv >= 3):
+            return False, f"no volume surge (15m/30m {ign_vs}x, RelVol {rv}) — wait for volume to start"
 
     # ── Already ran and dumped today ─────────────────────────
     if h and h > 0 and p < h * 0.75:
@@ -3503,6 +3562,11 @@ def run_scan(requester_id=None):
 
 
     f = FILTERS[session]
+    # When the inflow filter is ON, catch stocks EARLIER in the move (lower the
+    # change bar) — the OBV↑ + volume-surge requirement keeps quality high, so we
+    # can trigger during the rise instead of after the wave already finished.
+    if INFLOW_REQUIRED:
+        f = {**f, "min_change": max(5.0, f["min_change"] - 8.0)}
 
     # ── Market context (SPY) ──────────────────────────────
     spy_chg = fetch_spy_change()
