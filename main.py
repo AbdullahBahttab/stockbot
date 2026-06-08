@@ -660,7 +660,7 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")  # add credits at co
 
 FILTERS = {
     "PRE":   {"min_change": 10.0, "min_volume": 10_000,  "min_dollar_vol": 300_000,   "max_float_m": 25.0, "max_rsi": 90.0, "max_mcap_m": 300.0},
-    "OPEN":  {"min_change": 15.0, "min_volume": 500_000, "min_dollar_vol": 2_000_000, "max_float_m": 20.0, "max_rsi": 90.0, "max_mcap_m": 300.0},
+    "OPEN":  {"min_change": 10.0, "min_volume": 500_000, "min_dollar_vol": 2_000_000, "max_float_m": 20.0, "max_rsi": 90.0, "max_mcap_m": 300.0},
     "AFTER": {"min_change": 10.0, "min_volume": 50_000,  "min_dollar_vol": 500_000,   "max_float_m": 20.0, "max_rsi": 85.0, "max_mcap_m": 300.0},
 }
 
@@ -3384,7 +3384,7 @@ def passes_filters(stock: dict, fv: dict, f: dict) -> tuple:
     if rsi is None:
         if cat_pts < 2:                   return False, "RSI unknown — no strong catalyst to verify momentum"
     if rsi and rsi > f["max_rsi"]:        return False, f"RSI {rsi:.0f} > {f['max_rsi']:.0f} — parabolic"
-    if rsi and rsi < 45:                  return False, f"RSI {rsi:.0f} < 45 — momentum fading/dumping"
+    if rsi and rsi < 42:                  return False, f"RSI {rsi:.0f} < 42 — momentum fading/dumping"
     mfi = fv.get("mfi")
     if mfi and mfi >= 90 and (rsi is None or rsi > 75):
                                           return False, f"MFI {mfi:.0f} — money flow exhausted"
