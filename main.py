@@ -653,6 +653,7 @@ MOMENTUM_ALERTS = False   # separate "high-risk momentum" channel for big runner
                           # admin can enable live with /momentum on.
 MOMENTUM_MIN_FROM_HIGH = 0.50  # skip if price has collapsed below this fraction of day high
 SCAN_WORKERS    = 10      # stocks fetched in parallel
+MAX_CANDIDATES  = 40      # max stocks enriched per scan (screener can return many)
 PORTFOLIO_SIZE  = 10_000  # default portfolio $ for position sizing
 FLOAT_CACHE_TTL = 86_400  # float doesn't change daily — cache 24 h
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")  # add credits at console.anthropic.com then paste key
@@ -1302,6 +1303,54 @@ def fetch_gainers(session: str) -> list[dict]:
         return stocks
     except Exception as e:
         log.error(f"Gainers fetch error: {e}")
+        return []
+
+
+def fetch_screener_webull(f: dict, limit: int = 50) -> list[dict]:
+    """Full-universe screener via Webull — EVERY US stock matching the price
+    and change filters, not just a pre-made top-gainers list. Returns the same
+    shape as fetch_gainers: [{symbol, change, price, volume}].
+
+    Note: the screener filters on REGULAR-session change, so it's the broad net
+    for the OPEN session. PRE/AFTER movers are still caught by fetch_gainers."""
+    try:
+        min_chg = (f.get("min_change", 0) or 0) / 100.0
+        body = {
+            "fetch": limit,
+            "rules": {
+                "wlas.screener.rule.region":      "securities.region.name.6",
+                "wlas.screener.rule.lastPrice":   f"gte={MIN_PRICE}&lte={MAX_PRICE}",
+                "wlas.screener.rule.changeRatio": f"gte={min_chg}",
+            },
+            "sort":   {"rule": "wlas.screener.rule.changeRatio", "desc": True},
+            "attach": {"hkexPrivilege": False},
+        }
+        with _wb_semaphore:
+            r = _wb_http.post(
+                "https://quotes-gw.webullfintech.com/api/wlas/screener/query",
+                json=body, timeout=15,
+            )
+        if r.status_code != 200:
+            log.warning(f"Screener HTTP {r.status_code}")
+            return []
+        items  = r.json().get("items", [])
+        stocks = []
+        for it in items:
+            t   = it.get("ticker", {})
+            sym = t.get("symbol")
+            if not sym:
+                continue
+            try:
+                price  = float(t.get("close"))
+                change = float(t.get("changeRatio", 0)) * 100
+                volume = float(t.get("volume", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            stocks.append({"symbol": sym, "change": round(change, 2),
+                           "price": price, "volume": volume})
+        return stocks
+    except Exception as e:
+        log.error(f"Screener fetch error: {e}")
         return []
 
 
@@ -3457,17 +3506,29 @@ def run_scan(requester_id=None):
 
     log.info(f"[{now_str}] {SESSION_LABELS[session]} scan...  SPY {spy_chg:+.1f}%")
 
-    gainers = fetch_gainers(session)
-    if not gainers:
+    # Universe = Webull screener (every stock matching price+change) merged with
+    # the stockanalysis gainers page (catches pre/after-hours movers the
+    # regular-change screener misses). Dedup by symbol, keep the higher change.
+    screened = fetch_screener_webull(f)
+    gainers  = fetch_gainers(session)
+    merged   = {}
+    for stock in screened + gainers:
+        sym = stock["symbol"]
+        if sym not in merged or stock["change"] > merged[sym]["change"]:
+            merged[sym] = stock
+    universe = sorted(merged.values(), key=lambda s: s["change"], reverse=True)
+    log.info(f"  Universe: {len(screened)} screener + {len(gainers)} gainers → {len(universe)} unique")
+
+    if not universe:
         log.warning("No data returned")
-        _reply("⚠️ Could not fetch gainers list. Site may be slow — try again in 1 min.")
+        _reply("⚠️ Could not fetch stock list. Sources may be slow — try again in 1 min.")
         return
 
     # Basic pre-filter — no API calls yet
-    # Take top 20 by change%; drop only out-of-range price and cooldown stocks.
+    # Drop only out-of-range price and cooldown stocks, cap at MAX_CANDIDATES.
     # Volume check is skipped here — Webull gives accurate live volume in passes_filters.
     candidates = []
-    for stock in gainers[:20]:
+    for stock in universe[:MAX_CANDIDATES]:
         p, chg = stock["price"], stock["change"]
         if not (MIN_PRICE <= p <= MAX_PRICE): continue
         if chg < f["min_change"]:             continue
