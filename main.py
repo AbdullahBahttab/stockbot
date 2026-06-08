@@ -145,6 +145,12 @@ def migrate_db():
             "WHERE result='LOSS' AND (pnl_pct = 0 OR entry_price = exit_price)")
         if cur.rowcount:
             log.info(f"[DB] migrated {cur.rowcount} breakeven trade(s) LOSS→FLAT")
+        # Trades from a SELL with no prior BUY had entry_price=0 → nan P&L and
+        # false LOSS rows. Remove them so they don't corrupt the stats.
+        cur2 = conn.execute(
+            "DELETE FROM trades WHERE entry_price = 0 OR entry_price IS NULL")
+        if cur2.rowcount:
+            log.info(f"[DB] removed {cur2.rowcount} corrupt 0-entry trade(s)")
         conn.commit()
     except Exception as e:
         log.error(f"[DB] migrate: {e}")
@@ -3074,19 +3080,14 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
                         f"Tip: {tip} to log the exit price & P&L."
                     )
             else:
-                # Not tracked — but if user gave exit price, log it anyway
+                # Not tracked. Do NOT log a trade with no entry — a 0-entry row
+                # produces nan P&L and a false LOSS that corrupts the stats.
                 if exit_price:
-                    qty_final = qty_sell
-                    if DB_OK:
-                        db_log_trade(
-                            chat_id=uid, symbol=sym,
-                            entry=0.0,
-                            exit_price=exit_price, qty=qty_final,
-                        )
-                    qty_str = f"  ×{qty_final}" if qty_final else ""
                     send_to(uid,
-                        f"✅ <b>{sym}</b> exit logged at ${exit_price:.2f}{qty_str}\n"
-                        f"⚠️ No entry tracked — send <code>BUY {sym} price</code> next time to track P&L."
+                        f"⚠️ <b>{sym}</b> isn't tracked, so there's no entry price — "
+                        f"I can't log real P&L for it.\n"
+                        f"Next time send <code>BUY {sym} price</code> first, then "
+                        f"<code>SELL {sym} {exit_price:.2f}</code> to record the trade."
                     )
                 else:
                     send_to(uid,
