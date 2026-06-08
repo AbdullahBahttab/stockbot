@@ -2591,7 +2591,8 @@ def check_portfolio():
 
             # ── RSI / Volume exit signals ─────────────────────
             rsi_danger = rsi is not None and rsi > 75
-            vol_danger = rel_vol is not None and rel_vol < 2.0
+            # RelVol ~0 means missing/pre-market data, NOT dying volume — don't warn on it
+            vol_danger = rel_vol is not None and 0.1 <= rel_vol < 2.0
 
             if rsi_danger and vol_danger and not pos.get("exit_warned"):
                 send_to(uid,
