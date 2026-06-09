@@ -56,13 +56,15 @@ def setup_db():
     try:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS users (
-                chat_id   INTEGER PRIMARY KEY,
-                name      TEXT,
-                username  TEXT,
-                is_active INTEGER DEFAULT 1,
-                is_admin  INTEGER DEFAULT 0,
-                pin       TEXT    DEFAULT '1234',
-                joined_at DATETIME DEFAULT (datetime('now'))
+                chat_id     INTEGER PRIMARY KEY,
+                name        TEXT,
+                username    TEXT,
+                is_active   INTEGER DEFAULT 1,
+                is_admin    INTEGER DEFAULT 0,
+                pin         TEXT    DEFAULT '1234',
+                accepted    INTEGER DEFAULT 0,
+                accepted_at TEXT,
+                joined_at   DATETIME DEFAULT (datetime('now'))
             );
 
             CREATE TABLE IF NOT EXISTS portfolio (
@@ -151,6 +153,18 @@ def migrate_db():
             "DELETE FROM trades WHERE entry_price = 0 OR entry_price IS NULL")
         if cur2.rowcount:
             log.info(f"[DB] removed {cur2.rowcount} corrupt 0-entry trade(s)")
+        # Persist disclaimer acceptance across restarts — older DBs lack these
+        # columns, so the 'accepted' flag was lost on every redeploy and users
+        # had to re-accept. Add the columns; mark all EXISTING users accepted
+        # (they were already using the bot → they had accepted before).
+        for col, decl in (("accepted", "INTEGER DEFAULT 0"), ("accepted_at", "TEXT")):
+            try:
+                conn.execute(f"ALTER TABLE users ADD COLUMN {col} {decl}")
+                log.info(f"[DB] added users.{col} column")
+                if col == "accepted":
+                    conn.execute("UPDATE users SET accepted=1")
+            except Exception:
+                pass   # column already exists
         conn.commit()
     except Exception as e:
         log.error(f"[DB] migrate: {e}")
@@ -182,16 +196,18 @@ def db_load_users() -> dict:
         return {}
     try:
         cur = conn.cursor()
-        cur.execute("SELECT chat_id, name, username, is_active, is_admin, joined_at FROM users")
+        cur.execute("SELECT chat_id, name, username, is_active, is_admin, accepted, accepted_at, joined_at FROM users")
         result = {}
         for row in cur.fetchall():
             uid = str(row["chat_id"])
             result[uid] = {
-                "name":     row["name"]     or uid,
-                "username": row["username"] or "",
-                "active":   bool(row["is_active"]),
-                "is_admin": bool(row["is_admin"]),
-                "added":    str(row["joined_at"])[:10] if row["joined_at"] else "",
+                "name":        row["name"]     or uid,
+                "username":    row["username"] or "",
+                "active":      bool(row["is_active"]),
+                "is_admin":    bool(row["is_admin"]),
+                "accepted":    bool(row["accepted"]),
+                "accepted_at": row["accepted_at"] or "",
+                "added":       str(row["joined_at"])[:10] if row["joined_at"] else "",
             }
         return result
     except Exception as e:
@@ -256,6 +272,21 @@ def db_sync_users(users_dict: dict):
     for uid, u in users_dict.items():
         db_upsert_user(uid, u.get("name", uid), u.get("username", ""),
                        u.get("active", True), u.get("is_admin", False))
+
+
+def db_set_accepted(chat_id: str, accepted_at: str):
+    """Persist disclaimer acceptance so it survives restarts/redeploys."""
+    conn = get_conn()
+    if not conn:
+        return
+    try:
+        conn.execute("UPDATE users SET accepted=1, accepted_at=? WHERE chat_id=?",
+                     (accepted_at, int(chat_id)))
+        conn.commit()
+    except Exception as e:
+        log.error(f"[DB] set_accepted {chat_id}: {e}")
+    finally:
+        conn.close()
 
 
 # ─── Alerted / Cooldown ───────────────────────────────────────────────────────
@@ -2759,6 +2790,8 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
                     users[uid]["accepted"]    = True
                     users[uid]["accepted_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
             save_users()
+            if DB_OK:
+                db_set_accepted(uid, users.get(uid, {}).get("accepted_at", ""))
             send_to(uid,
                 "✅ <b>Thank you — terms accepted.</b>\nأهلًا بك! تم قبول الشروط.\n\n"
                 + _account_box(uid)
