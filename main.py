@@ -3461,7 +3461,11 @@ def passes_filters(stock: dict, fv: dict, f: dict) -> tuple:
     # 3. Micro-float coordinated pump
     if flt and flt < 2 and chg > 60 and cat_pts < 2:
         return False, f"micro-float {flt:.1f}M + {chg:.0f}% + no strong catalyst"
-    # 4. Near day high with weak catalyst — at peak of pump
+    # 4. At the top of the day's range = buying the peak, which fades. CLWT was
+    #    alerted at pos 1.0 (the exact day high) then dropped. Reject the very top
+    #    regardless of catalyst; reject a bit lower too when the catalyst is weak.
+    if pos is not None and pos > 0.90:
+        return False, f"at {pos:.0%} of day range — too close to day high, bad entry (wait for a dip)"
     if pos is not None and pos > 0.85 and cat_pts < 2:
         return False, f"at {pos:.0%} of day range — near peak, weak catalyst"
     # 5. MFI overbought + near high = buying exhaustion at pump peak
