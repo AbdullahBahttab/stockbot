@@ -657,9 +657,9 @@ ALERT_OPEN_MIN  = 30      # minutes to hit +5%; no target hit by then → FAIL
 MOMENTUM_ALERTS = False   # separate "high-risk momentum" channel for big runners the
                           # strict filter rejects (unverified pumps). OFF by default —
                           # admin can enable live with /momentum on.
-INFLOW_REQUIRED = False   # when ON, only alert stocks with confirmed inflow (OBV↑) +
-                          # volume surge — strict/high-quality. OFF = simple/more stocks.
-                          # Toggle live with /inflow on|off.
+INFLOW_REQUIRED = True    # when ON, only alert stocks with confirmed inflow (OBV↑) +
+                          # volume surge, caught earlier (lower change bar) — strict/
+                          # high-quality. Default ON per user. /inflow off = simple/more.
 MOMENTUM_MIN_FROM_HIGH = 0.50  # skip if price has collapsed below this fraction of day high
 SCAN_WORKERS    = 10      # stocks fetched in parallel
 MAX_CANDIDATES  = 40      # max stocks enriched per scan (screener can return many)
