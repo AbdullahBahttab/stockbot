@@ -677,7 +677,7 @@ LOG_FILE       = os.path.join(BASE_DIR, "scanner.log")
 
 MIN_PRICE       = 1.0
 MAX_PRICE       = 50.0
-SCAN_EVERY_MIN  = 2
+SCAN_EVERY_MIN  = 1      # scan every minute — faster reaction (was 2)
 ALERT_COOLDOWN  = 1800    # seconds before same stock can re-alert
 
 # Alert outcome simulation — how a real trade on the alert would have gone.
@@ -694,6 +694,11 @@ INFLOW_REQUIRED = True    # when ON, only alert stocks with confirmed inflow (OB
 MOMENTUM_MIN_FROM_HIGH = 0.50  # skip if price has collapsed below this fraction of day high
 SCAN_WORKERS    = 10      # stocks fetched in parallel
 MAX_CANDIDATES  = 40      # max stocks enriched per scan (screener can return many)
+# ── ORB (Opening Range Breakout) — separate fast 1-minute module ──
+ORB_RANGE_MIN   = 15      # opening range = high/low of the first 15 minutes
+ORB_WINDOW_END  = 11*60   # stop hunting breakouts after 11:00 ET (90 min post-open)
+ORB_MIN_RVOL    = 2.0     # breakout bar must have >= this x the opening-range avg volume
+orb_alerted     = set()   # symbols already ORB-alerted today (cleared in reset_daily)
 PORTFOLIO_SIZE  = 10_000  # default portfolio $ for position sizing
 FLOAT_CACHE_TTL = 86_400  # float doesn't change daily — cache 24 h
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")  # add credits at console.anthropic.com then paste key
@@ -3888,6 +3893,7 @@ def reset_daily():
         count = len(watchlist_log)
         watchlist_log.clear()
         momentum_alerted.clear()
+        orb_alerted.clear()
     save_watchlist()
     log.info(f"[Daily Reset] watchlist_log + momentum cooldowns cleared ({count} entries) — fresh start for today")
 
@@ -3946,6 +3952,132 @@ def check_alert_performance():
         log.info(f"[Performance] Resolved {resolved} alert outcome(s)")
 
 
+# ═══════════════════════════════════════════════════════════════
+#  ORB — OPENING RANGE BREAKOUT  (separate fast 1-minute module)
+#  Marks the first-15-min range and alerts on a volume breakout in the
+#  opening 90 minutes, using 1-minute bars. Fully independent of run_scan;
+#  any error here is caught so it can never break the main scanner.
+# ═══════════════════════════════════════════════════════════════
+
+def fetch_m1_bars(tid: str, count: int = 120) -> list:
+    """1-minute OHLCV bars for a Webull tickerId, oldest-first:
+    list of (ts, open, close, high, low, volume)."""
+    try:
+        with _wb_semaphore:
+            r = _wb_http.get(
+                "https://quotes-gw.webullfintech.com/api/quote/charts/query",
+                params={"tickerIds": tid, "type": "m1", "count": count}, timeout=10)
+        if r.status_code != 200:
+            return []
+        body = r.json()
+        rows = body[0].get("data", []) if isinstance(body, list) and body else []
+        bars = []
+        for row in rows:
+            p = str(row).split(",")          # ts,open,close,high,low,preClose,volume,vwap
+            if len(p) >= 7:
+                try:
+                    bars.append((int(p[0]), float(p[1]), float(p[2]),
+                                 float(p[3]), float(p[4]), float(p[6])))
+                except (ValueError, IndexError):
+                    continue
+        bars.reverse()                       # Webull returns newest-first
+        return bars
+    except Exception:
+        return []
+
+
+def opening_range(bars: list):
+    """High/low/avg-volume of the first ORB_RANGE_MIN minutes of today's regular
+    session, plus the session bars after it. None if there isn't enough data yet."""
+    et = datetime.now(EASTERN)
+    open_ts = int(et.replace(hour=9, minute=30, second=0, microsecond=0).timestamp())
+    session = [b for b in bars if b[0] >= open_ts]
+    if len(session) < ORB_RANGE_MIN + 1:
+        return None
+    rng   = session[:ORB_RANGE_MIN]
+    after = session[ORB_RANGE_MIN:]
+    or_high = max(b[3] for b in rng)
+    or_low  = min(b[4] for b in rng)
+    or_vol  = sum(b[5] for b in rng) / len(rng)
+    return or_high, or_low, or_vol, after
+
+
+def detect_orb(symbol: str):
+    """Return an ORB breakout signal for `symbol`, or None. Breakout = the latest
+    1-min bar closes above the opening-range high, the previous bar did not, and
+    the breakout bar shows a clear volume surge."""
+    tid = fetch_webull_id(symbol)
+    if not tid:
+        return None
+    rng = opening_range(fetch_m1_bars(tid))
+    if not rng:
+        return None
+    or_high, or_low, or_vol, after = rng
+    if len(after) < 2 or or_vol <= 0:
+        return None
+    last, prev = after[-1], after[-2]
+    price, vol = last[2], last[5]
+    if price > or_high and prev[2] <= or_high and vol >= or_vol * ORB_MIN_RVOL:
+        return {"symbol": symbol, "price": price, "or_high": or_high,
+                "or_low": or_low, "rvol": round(vol / or_vol, 1)}
+    return None
+
+
+def build_orb_alert(sig: dict) -> str:
+    sym, price = sig["symbol"], sig["price"]
+    tgt = calc_targets(price, {})
+    return (
+        f"🚀 <b>ORB BREAKOUT — {sym}</b>   ${price:.2f}\n"
+        f"Broke opening-range high ${sig['or_high']:.2f}  ·  vol {sig['rvol']}x\n"
+        f"Entry    ${round(price*0.99, 2)} – ${round(price*1.01, 2)}\n"
+        f"Stop     ${tgt['stop']}   -{tgt['stop_pct']}%  (keep it tight)\n"
+        f"{tgt['label']}\n"
+        f"⏱️ Fast trade — first 90 min only.\n"
+        f"💬 <code>/check {sym}</code>"
+    )
+
+
+def orb_scan():
+    """Opening-Range-Breakout hunter. Scheduled every minute but only acts in the
+    9:45–11:00 ET window. Additive — wrapped in try/except so a failure here can
+    never break the main scanner."""
+    try:
+        et = datetime.now(EASTERN)
+        if et.weekday() >= 5:
+            return
+        mins = et.hour * 60 + et.minute
+        if not (9*60 + 30 + ORB_RANGE_MIN <= mins <= ORB_WINDOW_END):
+            return                            # outside the opening-range window
+        f = FILTERS["OPEN"]
+        universe = fetch_screener_webull(f) + fetch_gainers("OPEN")
+        seen, syms = set(), []
+        for s in universe:
+            sym = s["symbol"]
+            if sym in seen or sym in orb_alerted:
+                continue
+            if not (MIN_PRICE <= s["price"] <= MAX_PRICE):
+                continue
+            seen.add(sym)
+            syms.append(sym)
+        syms = syms[:MAX_CANDIDATES]
+        if not syms:
+            return
+        signals = []
+        with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as pool:
+            for sig in pool.map(detect_orb, syms):
+                if sig:
+                    signals.append(sig)
+        for sig in signals:
+            orb_alerted.add(sig["symbol"])
+            broadcast(build_orb_alert(sig))
+            log.info(f"  [ORB] {sig['symbol']} broke ${sig['or_high']:.2f} "
+                     f"@ ${sig['price']:.2f} (vol {sig['rvol']}x)")
+        if signals:
+            log.info(f"[ORB] {len(signals)} breakout(s) sent")
+    except Exception as e:
+        log.error(f"[ORB] scan error: {e}")
+
+
 def main():
     if not acquire_lock():
         sys.exit(1)
@@ -3987,6 +4119,7 @@ def main():
     schedule.every(15).minutes.do(reset_stale_cooldowns)
     schedule.every().day.at("09:25").do(reset_daily)        # ET — clear yesterday's alerts before open
     schedule.every(20).minutes.do(check_alert_performance)   # resolve T1/T2/stop through the day
+    schedule.every(1).minutes.do(orb_scan)                   # ORB breakouts — first 90 min only
     while True:
         schedule.run_pending()
         time.sleep(20)
