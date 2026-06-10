@@ -4070,6 +4070,13 @@ def orb_scan():
         for sig in signals:
             orb_alerted.add(sig["symbol"])
             broadcast(build_orb_alert(sig))
+            # Log to the alerts table (grade "ORB") so the dashboard tracks its
+            # win-rate separately — check_alert_performance resolves +5%/30min.
+            if DB_OK:
+                bpct = round((sig["price"] - sig["or_high"]) / sig["or_high"] * 100, 2) if sig["or_high"] else 0.0
+                db_log_alert(symbol=sig["symbol"], price=sig["price"], grade="ORB",
+                             change_pct=bpct, float_m=None, rsi=None, volume=None,
+                             rel_vol=sig["rvol"], mcap_m=None, session="ORB")
             log.info(f"  [ORB] {sig['symbol']} broke ${sig['or_high']:.2f} "
                      f"@ ${sig['price']:.2f} (vol {sig['rvol']}x)")
         if signals:
@@ -4913,7 +4920,7 @@ def page_insights(auth, lang="en"):
     wr_rows = []
     if alerted and "grade" in al.columns and "outcome" in al.columns:
         ev = al[al["outcome"].isin(["PASS", "FAIL"])]   # resolved win/loss only
-        for grade in ["A", "B"]:
+        for grade in ["A", "B", "ORB"]:
             sub = ev[ev["grade"] == grade]
             if len(sub):
                 wins = int((sub["outcome"] == "PASS").sum())
