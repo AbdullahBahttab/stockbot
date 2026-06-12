@@ -3702,27 +3702,35 @@ def run_scan(requester_id=None):
         # Re-alert gate: allow if fresh money flow confirms a new leg
         prev = next((item for item in reversed(list(watchlist_log)) if item["sym"] == sym), None)
         curr_price = fv.get("price") or stock["price"]
-        if prev:
+        if prev and prev.get("price"):
             ratio     = curr_price / prev["price"]
             obv_fresh = fv.get("obv_trend") == "↑"
             mfi       = fv.get("mfi")
             mfi_ok    = mfi is None or mfi < 75
             rv_now    = fv.get("rel_vol")
             rv_prev   = prev.get("rel_vol")
-            # Second wave: a genuine fresh volume surge vs the prior alert.
-            # (These already passed the liquidity floor, so it can't re-open thin names.)
             second_wave = (rv_now is not None and rv_now >= 5
                            and (rv_prev is None or rv_now >= rv_prev * 1.5))
-            if 0.85 <= ratio <= 1.50:
-                if (obv_fresh or second_wave) and mfi_ok:
-                    mfi_s = f"{mfi:.0f}" if mfi else "N/A"
-                    why   = (f"2nd-wave RelVol {rv_now:.0f}x"
-                             if second_wave and not obv_fresh else f"OBV↑ + MFI={mfi_s}")
-                    log.info(f"  Allow {sym} re-alert — {why} → fresh new leg vs prev ${prev['price']:.2f}")
-                else:
-                    log.info(f"  Skip {sym} re-alert — no fresh money flow "
-                             f"(OBV={fv.get('obv_trend')}, MFI={mfi}, RelVol={rv_now}) vs prev ${prev['price']:.2f}")
-                    continue
+            # Re-alert ONLY on a genuine NEW LEG UP: the price must be clearly ABOVE
+            # the prior alert (>=5%) but not already blown off (>50%). If it's at or
+            # below the prior alert it has FADED — never re-alert. This was the bug
+            # behind the same stock alerting 2-3 times as it dribbled down (e.g. SMSI):
+            # the old gate allowed re-alerts from -15% below to +50% above the prior.
+            if ratio < 1.05:
+                log.info(f"  Skip {sym} re-alert — ${curr_price:.2f} not above prior "
+                         f"alert ${prev['price']:.2f} (faded/stalled, no new leg)")
+                continue
+            if ratio > 1.50:
+                log.info(f"  Skip {sym} re-alert — +{(ratio-1)*100:.0f}% past prior alert, too extended")
+                continue
+            if not ((obv_fresh or second_wave) and mfi_ok):
+                log.info(f"  Skip {sym} re-alert — no fresh money flow "
+                         f"(OBV={fv.get('obv_trend')}, MFI={mfi}, RelVol={rv_now})")
+                continue
+            mfi_s = f"{mfi:.0f}" if mfi else "N/A"
+            why   = (f"2nd-wave RelVol {rv_now:.0f}x" if second_wave and not obv_fresh
+                     else f"OBV↑ + MFI={mfi_s}")
+            log.info(f"  Allow {sym} re-alert — {why} → fresh new leg vs prev ${prev['price']:.2f}")
         broadcast(build_alert_simple(stock, fv, session))
         with _lock:
             alerted[sym] = time.time()
