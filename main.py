@@ -4043,14 +4043,17 @@ def detect_orb(symbol: str):
 def build_orb_alert(sig: dict) -> str:
     sym, price = sig["symbol"], sig["price"]
     tgt = calc_targets(price, {})
+    entry_lo = round(price * 0.99, 2)
+    entry_hi = round(price * 1.01, 2)
+    D = "━━━━━━━━━━━━━━━━━━━━"
     return (
-        f"🚀 <b>ORB BREAKOUT — {sym}</b>   ${price:.2f}\n"
-        f"Broke opening-range high ${sig['or_high']:.2f}  ·  vol {sig['rvol']}x\n"
-        f"Entry    ${round(price*0.99, 2)} – ${round(price*1.01, 2)}\n"
-        f"Stop     ${tgt['stop']}   -{tgt['stop_pct']}%  (keep it tight)\n"
+        f"🚀 <b>{sym}</b>   ${price:.2f}   ORB breakout\n"
+        f"Entry    ${entry_lo} – ${entry_hi}\n"
+        f"Stop     ${tgt['stop']}   -{tgt['stop_pct']}%\n"
         f"{tgt['label']}\n"
-        f"⏱️ Fast trade — first 90 min only.\n"
-        f"💬 <code>/check {sym}</code>"
+        f"📊 Broke opening-range high ${sig['or_high']:.2f}  ·  vol {sig['rvol']}x\n"
+        f"{D}\n"
+        f"💬 <code>/check {sym}</code> for full analysis"
     )
 
 
@@ -4178,14 +4181,19 @@ def detect_gap_pullback(symbol: str):
 
 def build_gap_alert(sig: dict) -> str:
     sym, price = sig["symbol"], sig["price"]
-    stop = round(sig["support"] * 0.97, 2)   # just below support
+    stop     = round(sig["support"] * 0.97, 2)   # just below support
+    stop_pct = round((price - stop) / price * 100, 1) if price else 0.0
+    entry_lo = round(price * 0.99, 2)
+    entry_hi = round(price * 1.01, 2)
+    D = "━━━━━━━━━━━━━━━━━━━━"
     return (
-        f"🎯 <b>GAP PULLBACK — {sym}</b>   ${price:.2f}\n"
-        f"Pulled back to support ${sig['support']:.2f} after a news gap\n"
-        f"Entry    near ${price:.2f}\n"
-        f"Stop     ${stop}   (just below support — exit if it breaks)\n"
-        f"Target   ${sig['peak']:.2f}   (+{sig['upside']}% — prior peak)\n"
-        f"💬 <code>/check {sym}</code>"
+        f"🎯 <b>{sym}</b>   ${price:.2f}   GAP pullback\n"
+        f"Entry    ${entry_lo} – ${entry_hi}\n"
+        f"Stop     ${stop}   -{stop_pct}%  (below support)\n"
+        f"🎯 Target ${sig['peak']:.2f}  (+{sig['upside']}% — prior peak)\n"
+        f"📊 Pulled back to support ${sig['support']:.2f} after a news gap\n"
+        f"{D}\n"
+        f"💬 <code>/check {sym}</code> for full analysis"
     )
 
 
