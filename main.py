@@ -699,6 +699,12 @@ ORB_RANGE_MIN   = 15      # opening range = high/low of the first 15 minutes
 ORB_WINDOW_END  = 11*60   # stop hunting breakouts after 11:00 ET (90 min post-open)
 ORB_MIN_RVOL    = 2.0     # breakout bar must have >= this x the opening-range avg volume
 orb_alerted     = set()   # symbols already ORB-alerted today (cleared in reset_daily)
+# ── Gap-Pullback (gap-up-on-news, then buy the pullback to support) ──
+GAP_MIN_PCT       = 20.0  # the prior 'gap' day must have run up >= this %
+GAP_LOOKBACK_DAYS = 6     # look for the gap day within the last N trading days
+GAP_ENTRY_ZONE    = 0.10  # entry when price is within this % above support
+GAP_MIN_UPSIDE    = 0.15  # target (prior peak) must be >= this % above current price
+gap_alerted       = set() # symbols already gap-alerted today (cleared in reset_daily)
 PORTFOLIO_SIZE  = 10_000  # default portfolio $ for position sizing
 FLOAT_CACHE_TTL = 86_400  # float doesn't change daily — cache 24 h
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")  # add credits at console.anthropic.com then paste key
@@ -3894,6 +3900,7 @@ def reset_daily():
         watchlist_log.clear()
         momentum_alerted.clear()
         orb_alerted.clear()
+        gap_alerted.clear()
     save_watchlist()
     log.info(f"[Daily Reset] watchlist_log + momentum cooldowns cleared ({count} entries) — fresh start for today")
 
@@ -4085,6 +4092,130 @@ def orb_scan():
         log.error(f"[ORB] scan error: {e}")
 
 
+# ═══════════════════════════════════════════════════════════════
+#  GAP PULLBACK  (gap-up-on-news → buy the pullback to support)
+#  A stock gapped/ran up on a catalyst, then pulled back to the base of
+#  that move (support). Entry near support, stop just below it, target the
+#  prior peak. Separate module; try/except so it can't break run_scan.
+# ═══════════════════════════════════════════════════════════════
+
+def fetch_daily_bars(tid: str, count: int = 12) -> list:
+    """Daily OHLCV bars, oldest-first: (ts, open, close, high, low, volume)."""
+    try:
+        with _wb_semaphore:
+            r = _wb_http.get(
+                "https://quotes-gw.webullfintech.com/api/quote/charts/query",
+                params={"tickerIds": tid, "type": "d1", "count": count}, timeout=10)
+        if r.status_code != 200:
+            return []
+        body = r.json()
+        rows = body[0].get("data", []) if isinstance(body, list) and body else []
+        bars = []
+        for row in rows:
+            p = str(row).split(",")
+            if len(p) >= 7:
+                try:
+                    bars.append((int(p[0]), float(p[1]), float(p[2]),
+                                 float(p[3]), float(p[4]), float(p[6])))
+                except (ValueError, IndexError):
+                    continue
+        bars.reverse()
+        return bars
+    except Exception:
+        return []
+
+
+def detect_gap_pullback(symbol: str):
+    """Gap-up-on-news pullback setup. Cheap daily-bar geometry check first; only
+    confirms the (expensive) news catalyst if the geometry matches."""
+    tid = fetch_webull_id(symbol)
+    if not tid:
+        return None
+    bars = fetch_daily_bars(tid)
+    if len(bars) < 3:
+        return None
+    price = bars[-1][2]                      # today's current/close
+    if not (MIN_PRICE <= price <= MAX_PRICE):
+        return None
+    # find the 'gap candle' — biggest run-up day among the prior days (exclude today)
+    recent = bars[:-1][-GAP_LOOKBACK_DAYS:]
+    gap = None
+    for i in range(1, len(recent)):
+        prev_close = recent[i-1][2]
+        if prev_close > 0:
+            run = (recent[i][3] - prev_close) / prev_close * 100
+            if run >= GAP_MIN_PCT and (gap is None or recent[i][3] > gap[3]):
+                gap = recent[i]
+    if not gap:
+        return None
+    peak, support = gap[3], gap[4]           # day high = target, day low = support
+    if support <= 0 or peak <= support:
+        return None
+    # price must have pulled back to NEAR support (entry zone), still above it
+    if not (support <= price <= support * (1 + GAP_ENTRY_ZONE)):
+        return None
+    # target (prior peak) must be meaningfully above the current price
+    if peak < price * (1 + GAP_MIN_UPSIDE):
+        return None
+    # geometry matches — confirm a positive catalyst (the whole premise of this setup)
+    fv = fetch_stock_data(symbol)
+    if not fv or score_catalyst(fv.get("news", ""))[0] < 1:
+        return None
+    p = fv.get("price") or price
+    return {"symbol": symbol, "price": p, "support": support,
+            "peak": peak, "upside": round((peak - p) / p * 100, 1)}
+
+
+def build_gap_alert(sig: dict) -> str:
+    sym, price = sig["symbol"], sig["price"]
+    stop = round(sig["support"] * 0.97, 2)   # just below support
+    return (
+        f"🎯 <b>GAP PULLBACK — {sym}</b>   ${price:.2f}\n"
+        f"Pulled back to support ${sig['support']:.2f} after a news gap\n"
+        f"Entry    near ${price:.2f}\n"
+        f"Stop     ${stop}   (just below support — exit if it breaks)\n"
+        f"Target   ${sig['peak']:.2f}   (+{sig['upside']}% — prior peak)\n"
+        f"💬 <code>/check {sym}</code>"
+    )
+
+
+def gap_scan():
+    """Gap-pullback hunter. Scans recently-alerted gappers + today's movers and
+    alerts when one has pulled back to support. Additive; wrapped in try/except."""
+    try:
+        if get_session() is None:
+            return
+        watch = set()
+        try:
+            for a in db_get_recent_alerts(72):
+                watch.add(a["symbol"])
+        except Exception:
+            pass
+        for s in (fetch_screener_webull(FILTERS["OPEN"]) + fetch_gainers("OPEN")):
+            watch.add(s["symbol"])
+        syms = [s for s in watch if s not in gap_alerted][:MAX_CANDIDATES]
+        if not syms:
+            return
+        signals = []
+        with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as pool:
+            for sig in pool.map(detect_gap_pullback, syms):
+                if sig:
+                    signals.append(sig)
+        for sig in signals:
+            gap_alerted.add(sig["symbol"])
+            broadcast(build_gap_alert(sig))
+            if DB_OK:
+                db_log_alert(symbol=sig["symbol"], price=sig["price"], grade="GAP",
+                             change_pct=0.0, float_m=None, rsi=None, volume=None,
+                             rel_vol=None, mcap_m=None, session="GAP")
+            log.info(f"  [GAP] {sig['symbol']} pullback to ${sig['support']:.2f}, "
+                     f"target ${sig['peak']:.2f} (+{sig['upside']}%)")
+        if signals:
+            log.info(f"[GAP] {len(signals)} pullback setup(s) sent")
+    except Exception as e:
+        log.error(f"[GAP] scan error: {e}")
+
+
 def main():
     if not acquire_lock():
         sys.exit(1)
@@ -4127,6 +4258,7 @@ def main():
     schedule.every().day.at("09:25").do(reset_daily)        # ET — clear yesterday's alerts before open
     schedule.every(20).minutes.do(check_alert_performance)   # resolve T1/T2/stop through the day
     schedule.every(1).minutes.do(orb_scan)                   # ORB breakouts — first 90 min only
+    schedule.every(10).minutes.do(gap_scan)                  # gap-up-on-news pullback setups
     while True:
         schedule.run_pending()
         time.sleep(20)
@@ -4920,7 +5052,7 @@ def page_insights(auth, lang="en"):
     wr_rows = []
     if alerted and "grade" in al.columns and "outcome" in al.columns:
         ev = al[al["outcome"].isin(["PASS", "FAIL"])]   # resolved win/loss only
-        for grade in ["A", "B", "ORB"]:
+        for grade in ["A", "B", "ORB", "GAP"]:
             sub = ev[ev["grade"] == grade]
             if len(sub):
                 wins = int((sub["outcome"] == "PASS").sum())
