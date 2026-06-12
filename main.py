@@ -2520,7 +2520,7 @@ def build_momentum_alert(stock: dict, fv: dict, session: str, reject_reason: str
     stats = []
     if flt is not None: stats.append(f"Float {flt:.1f}M")
     if rsi is not None: stats.append(f"RSI {rsi:.0f}")
-    if rv  is not None: stats.append(f"RelVol {rv:.0f}x")
+    if rv  is not None: stats.append(f"RelVol {rv:.1f}x")
     if h and l and h != l:
         stats.append(f"Range {range_bar(price, h, l)}")
     stats_line = ("  •  ".join(stats) + "\n") if stats else ""
@@ -2562,7 +2562,7 @@ def build_alert(stock: dict, fv: dict, session: str) -> str:
     if fv.get("rsi") is not None:       ind_bits.append(f"RSI {fv['rsi']:.0f}")
     if fv.get("mfi") is not None:       ind_bits.append(f"MFI {fv['mfi']:.0f}")
     if fv.get("obv_trend", "→") != "→": ind_bits.append(f"OBV {fv['obv_trend']}")
-    if fv.get("rel_vol"):               ind_bits.append(f"RelVol {fv['rel_vol']:.0f}x")
+    if fv.get("rel_vol"):               ind_bits.append(f"RelVol {fv['rel_vol']:.1f}x")
     ind_line = ("📊 " + "   ".join(ind_bits) + "\n") if ind_bits else ""
 
     return (
@@ -3515,7 +3515,7 @@ def passes_filters(stock: dict, fv: dict, f: dict) -> tuple:
         vwap_limit = 1.2 if (fv.get("rsi_source") == "daily" and chg > 100) else 1.38
         if p > vwap * vwap_limit:         return False, f"price ${p:.2f} > {vwap_limit}x VWAP ${vwap:.2f} — over-extended, will fade"
     if rv and rv < 0.5 and chg > 50:      return False, f"dying volume RelVol={rv:.1f}x"
-    if rv is not None and rv < 3.0:       return False, f"RelVol {rv:.1f}x < 3x — not enough volume (Balanced)"
+    if rv is not None and 0 < rv < 3.0:   return False, f"RelVol {rv:.1f}x < 3x — not enough volume (Balanced)"
     h, l      = fv.get("high"), fv.get("low")
     obv       = fv.get("obv_trend", "→")
     pos       = (p - l) / (h - l) if (h and l and h != l) else None
