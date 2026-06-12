@@ -675,9 +675,9 @@ ALERTED_FILE   = os.path.join(BASE_DIR, "alerted.json")
 TRACKED_FILE   = os.path.join(BASE_DIR, "tracked.json")
 LOG_FILE       = os.path.join(BASE_DIR, "scanner.log")
 
-MIN_PRICE       = 1.0
-MAX_PRICE       = 50.0
-MAX_CHANGE_PCT  = 60.0    # don't alert stocks already up more than this % — too extended, they fade
+MIN_PRICE       = 5.0     # Balanced floor — blocks sub-$5 pump-and-dump junk (JEM/CLWT/SMSI)
+MAX_PRICE       = 65.0
+MAX_CHANGE_PCT  = 40.0    # don't alert stocks already up more than this % — too extended, they fade
 SCAN_EVERY_MIN  = 1      # scan every minute — faster reaction (was 2)
 ALERT_COOLDOWN  = 1800    # seconds before same stock can re-alert
 
@@ -696,12 +696,14 @@ MOMENTUM_MIN_FROM_HIGH = 0.50  # skip if price has collapsed below this fraction
 SCAN_WORKERS    = 10      # stocks fetched in parallel
 MAX_CANDIDATES  = 40      # max stocks enriched per scan (screener can return many)
 # ── ORB (Opening Range Breakout) — separate fast 1-minute module ──
-ORB_RANGE_MIN   = 15      # opening range = high/low of the first 15 minutes
+ORB_RANGE_MIN   = 12      # opening range = high/low of the first 12 minutes (Balanced)
 ORB_WINDOW_END  = 11*60   # stop hunting breakouts after 11:00 ET (90 min post-open)
-ORB_MIN_RVOL    = 2.0     # breakout bar must have >= this x the opening-range avg volume
+ORB_MIN_RVOL    = 3.2     # breakout bar must have >= this x the opening-range avg volume (Balanced)
+ORB_VWAP_LIMIT  = 1.38    # breakout price must be <= this x VWAP (not over-extended)
 orb_alerted     = set()   # symbols already ORB-alerted today (cleared in reset_daily)
 # ── Gap-Pullback (gap-up-on-news, then buy the pullback to support) ──
-GAP_MIN_PCT       = 20.0  # the prior 'gap' day must have run up >= this %
+GAP_MIN_PCT       = 15.0  # the prior 'gap' day must have run up >= this %
+GAP_MAX_PCT       = 45.0  # ...but <= this % (above that it's blown off, won't bounce clean)
 GAP_LOOKBACK_DAYS = 6     # look for the gap day within the last N trading days
 GAP_ENTRY_ZONE    = 0.10  # entry when price is within this % above support
 GAP_MIN_UPSIDE    = 0.15  # target (prior peak) must be >= this % above current price
@@ -711,9 +713,9 @@ FLOAT_CACHE_TTL = 86_400  # float doesn't change daily — cache 24 h
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")  # add credits at console.anthropic.com then paste key
 
 FILTERS = {
-    "PRE":   {"min_change": 10.0, "min_volume": 10_000,  "min_dollar_vol": 300_000,   "max_float_m": 25.0, "max_rsi": 90.0, "max_mcap_m": 300.0},
-    "OPEN":  {"min_change": 15.0, "min_volume": 500_000, "min_dollar_vol": 2_000_000, "max_float_m": 20.0, "max_rsi": 90.0, "max_mcap_m": 300.0},
-    "AFTER": {"min_change": 10.0, "min_volume": 50_000,  "min_dollar_vol": 500_000,   "max_float_m": 20.0, "max_rsi": 85.0, "max_mcap_m": 300.0},
+    "PRE":   {"min_change": 9.0,  "min_volume": 10_000,  "min_dollar_vol": 300_000,   "max_float_m": 100.0, "max_rsi": 78.0, "max_mcap_m": 300.0},
+    "OPEN":  {"min_change": 10.0, "min_volume": 500_000, "min_dollar_vol": 2_000_000, "max_float_m": 100.0, "max_rsi": 78.0, "max_mcap_m": 300.0},
+    "AFTER": {"min_change": 9.0,  "min_volume": 50_000,  "min_dollar_vol": 500_000,   "max_float_m": 100.0, "max_rsi": 78.0, "max_mcap_m": 300.0},
 }
 
 URLS = {
@@ -2444,6 +2446,14 @@ def gap_line(price, fv) -> str:
     arrow = "⬆️" if g >= 0 else "⬇️"
     return f"Gap      {g:+.1f}% {arrow}  (prev close ${pc:.2f})\n"
 
+def scale_out_plan(price: float) -> str:
+    """Balanced scale-out exit plan, shown on every alert (A/B, ORB, GAP)."""
+    t1 = round(price * 1.017, 2)
+    t2 = round(price * 1.025, 2)
+    return (f"🎯 T1 ${t1} (+1.7%, take 50%)  ·  T2 ${t2} (+2.5%, take 30%)\n"
+            f"↳ trail 0.8% after T1  ·  ⏱️ exit in 27 min if T1 not hit")
+
+
 def build_alert_simple(stock: dict, fv: dict, session: str) -> str:
     """Short alert for auto-scan broadcasts — entry & stop, no indicators."""
     sym    = stock["symbol"]
@@ -2462,7 +2472,7 @@ def build_alert_simple(stock: dict, fv: dict, session: str) -> str:
         f"{grade_icon} <b>{sym}</b>   ${price:.2f}   {change:+.1f}%\n"
         f"Entry    ${entry_lo} – ${entry_hi}\n"
         f"Stop     ${tgt['stop']}   -{tgt['stop_pct']}%\n"
-        f"{tgt['label']}\n"
+        f"{scale_out_plan(price)}\n"
         f"📰 {cat_label}\n"
         f"{news_line}"
         f"{D}\n"
@@ -3467,17 +3477,17 @@ def passes_filters(stock: dict, fv: dict, f: dict) -> tuple:
     if rsi is None:
         if cat_pts < 2:                   return False, "RSI unknown — no strong catalyst to verify momentum"
     if rsi and rsi > f["max_rsi"]:        return False, f"RSI {rsi:.0f} > {f['max_rsi']:.0f} — parabolic"
-    if rsi and rsi < 45:                  return False, f"RSI {rsi:.0f} < 45 — momentum fading/dumping"
+    if rsi and rsi < 52:                  return False, f"RSI {rsi:.0f} < 52 — not enough momentum (Balanced)"
     mfi = fv.get("mfi")
-    if mfi and mfi >= 90 and (rsi is None or rsi > 75):
-                                          return False, f"MFI {mfi:.0f} — money flow exhausted"
+    if mfi and mfi >= 85:                 return False, f"MFI {mfi:.0f} >= 85 — money flow exhausted"
     if flt is None and mc and mc > 100:   return False, f"no float, mcap ${mc:.0f}M too large"
     if mc and mc < 1:                     return False, f"nano-cap ${mc:.1f}M"
     vwap = fv.get("vwap")
     if vwap and vwap > 0:
-        vwap_limit = 1.3 if (fv.get("rsi_source") == "daily" and chg > 100) else 1.7
+        vwap_limit = 1.2 if (fv.get("rsi_source") == "daily" and chg > 100) else 1.38
         if p > vwap * vwap_limit:         return False, f"price ${p:.2f} > {vwap_limit}x VWAP ${vwap:.2f} — over-extended, will fade"
     if rv and rv < 0.5 and chg > 50:      return False, f"dying volume RelVol={rv:.1f}x"
+    if rv is not None and rv < 3.0:       return False, f"RelVol {rv:.1f}x < 3x — not enough volume (Balanced)"
     h, l      = fv.get("high"), fv.get("low")
     obv       = fv.get("obv_trend", "→")
     pos       = (p - l) / (h - l) if (h and l and h != l) else None
@@ -3510,8 +3520,8 @@ def passes_filters(stock: dict, fv: dict, f: dict) -> tuple:
     # 4. At the top of the day's range = buying the peak, which fades. CLWT was
     #    alerted at pos 1.0 (the exact day high) then dropped. Reject the very top
     #    regardless of catalyst; reject a bit lower too when the catalyst is weak.
-    if pos is not None and pos > 0.90:
-        return False, f"at {pos:.0%} of day range — too close to day high, bad entry (wait for a dip)"
+    if pos is not None and pos > 0.75:
+        return False, f"at {pos:.0%} of day range — too close to day high, wait for a dip (Balanced ≤75%)"
     if pos is not None and pos > 0.85 and cat_pts < 2:
         return False, f"at {pos:.0%} of day range — near peak, weak catalyst"
     # 5. MFI overbought + near high = buying exhaustion at pump peak
@@ -3617,11 +3627,9 @@ def run_scan(requester_id=None):
 
 
     f = FILTERS[session]
-    # When the inflow filter is ON, catch stocks EARLIER in the move (lower the
-    # change bar) — the OBV↑ + volume-surge requirement keeps quality high, so we
-    # can trigger during the rise instead of after the wave already finished.
-    if INFLOW_REQUIRED:
-        f = {**f, "min_change": max(5.0, f["min_change"] - 8.0)}
+    # Balanced config sets the change range directly (9-40%), so we no longer lower
+    # the change bar in inflow mode. The inflow filter still requires OBV↑ + volume
+    # surge in passes_filters — it just doesn't change the entry %.
 
     # ── Market context (SPY) ──────────────────────────────
     spy_chg = fetch_spy_change()
@@ -3978,7 +3986,7 @@ def check_alert_performance():
 
 def fetch_m1_bars(tid: str, count: int = 120) -> list:
     """1-minute OHLCV bars for a Webull tickerId, oldest-first:
-    list of (ts, open, close, high, low, volume)."""
+    list of (ts, open, close, high, low, volume, vwap)."""
     try:
         with _wb_semaphore:
             r = _wb_http.get(
@@ -3994,7 +4002,8 @@ def fetch_m1_bars(tid: str, count: int = 120) -> list:
             if len(p) >= 7:
                 try:
                     bars.append((int(p[0]), float(p[1]), float(p[2]),
-                                 float(p[3]), float(p[4]), float(p[6])))
+                                 float(p[3]), float(p[4]), float(p[6]),
+                                 float(p[7]) if len(p) > 7 and p[7] else 0.0))
                 except (ValueError, IndexError):
                     continue
         bars.reverse()                       # Webull returns newest-first
@@ -4034,6 +4043,10 @@ def detect_orb(symbol: str):
         return None
     last, prev = after[-1], after[-2]
     price, vol = last[2], last[5]
+    vwap = last[6] if len(last) > 6 else 0.0
+    # Balanced: don't chase a breakout that's already over-extended above VWAP
+    if vwap and price > vwap * ORB_VWAP_LIMIT:
+        return None
     if price > or_high and prev[2] <= or_high and vol >= or_vol * ORB_MIN_RVOL:
         return {"symbol": symbol, "price": price, "or_high": or_high,
                 "or_low": or_low, "rvol": round(vol / or_vol, 1)}
@@ -4050,7 +4063,7 @@ def build_orb_alert(sig: dict) -> str:
         f"🚀 <b>{sym}</b>   ${price:.2f}   ORB breakout\n"
         f"Entry    ${entry_lo} – ${entry_hi}\n"
         f"Stop     ${tgt['stop']}   -{tgt['stop_pct']}%\n"
-        f"{tgt['label']}\n"
+        f"{scale_out_plan(price)}\n"
         f"📊 Broke opening-range high ${sig['or_high']:.2f}  ·  vol {sig['rvol']}x\n"
         f"{D}\n"
         f"💬 <code>/check {sym}</code> for full analysis"
@@ -4157,7 +4170,7 @@ def detect_gap_pullback(symbol: str):
         prev_close = recent[i-1][2]
         if prev_close > 0:
             run = (recent[i][3] - prev_close) / prev_close * 100
-            if run >= GAP_MIN_PCT and (gap is None or recent[i][3] > gap[3]):
+            if GAP_MIN_PCT <= run <= GAP_MAX_PCT and (gap is None or recent[i][3] > gap[3]):
                 gap = recent[i]
     if not gap:
         return None
@@ -4190,8 +4203,8 @@ def build_gap_alert(sig: dict) -> str:
         f"🎯 <b>{sym}</b>   ${price:.2f}   GAP pullback\n"
         f"Entry    ${entry_lo} – ${entry_hi}\n"
         f"Stop     ${stop}   -{stop_pct}%  (below support)\n"
-        f"🎯 Target ${sig['peak']:.2f}  (+{sig['upside']}% — prior peak)\n"
-        f"📊 Pulled back to support ${sig['support']:.2f} after a news gap\n"
+        f"{scale_out_plan(price)}\n"
+        f"🎯 Stretch ${sig['peak']:.2f} (+{sig['upside']}% prior peak)  ·  support ${sig['support']:.2f}\n"
         f"{D}\n"
         f"💬 <code>/check {sym}</code> for full analysis"
     )
