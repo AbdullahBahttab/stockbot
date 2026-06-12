@@ -677,6 +677,7 @@ LOG_FILE       = os.path.join(BASE_DIR, "scanner.log")
 
 MIN_PRICE       = 1.0
 MAX_PRICE       = 50.0
+MAX_CHANGE_PCT  = 60.0    # don't alert stocks already up more than this % — too extended, they fade
 SCAN_EVERY_MIN  = 1      # scan every minute — faster reaction (was 2)
 ALERT_COOLDOWN  = 1800    # seconds before same stock can re-alert
 
@@ -3453,6 +3454,7 @@ def passes_filters(stock: dict, fv: dict, f: dict) -> tuple:
 
     if not (MIN_PRICE <= p <= MAX_PRICE): return False, f"price ${p:.2f} out of range"
     if chg < f["min_change"]:             return False, f"change {chg:.0f}% < {f['min_change']:.0f}%"
+    if chg > MAX_CHANGE_PCT:              return False, f"already up {chg:.0f}% — too extended to chase (fades after alert)"
     if vol and vol < f["min_volume"] and not (rv and rv > 15):
                                           return False, f"vol {vol:,} < {f['min_volume']:,}"
     # Hard liquidity floor — absolute $-volume (price x shares). Cannot be
@@ -3473,8 +3475,8 @@ def passes_filters(stock: dict, fv: dict, f: dict) -> tuple:
     if mc and mc < 1:                     return False, f"nano-cap ${mc:.1f}M"
     vwap = fv.get("vwap")
     if vwap and vwap > 0:
-        vwap_limit = 1.8 if (fv.get("rsi_source") == "daily" and chg > 100) else 2.5
-        if p > vwap * vwap_limit:         return False, f"price ${p:.2f} > {vwap_limit}x VWAP ${vwap:.2f}"
+        vwap_limit = 1.3 if (fv.get("rsi_source") == "daily" and chg > 100) else 1.7
+        if p > vwap * vwap_limit:         return False, f"price ${p:.2f} > {vwap_limit}x VWAP ${vwap:.2f} — over-extended, will fade"
     if rv and rv < 0.5 and chg > 50:      return False, f"dying volume RelVol={rv:.1f}x"
     h, l      = fv.get("high"), fv.get("low")
     obv       = fv.get("obv_trend", "→")
