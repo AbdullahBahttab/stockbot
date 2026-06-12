@@ -664,7 +664,7 @@ import random
 import platform
 import logging
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -731,6 +731,7 @@ gap_alerted       = set() # symbols already gap-alerted today (cleared in reset_
 PORTFOLIO_SIZE  = 10_000  # default portfolio $ for position sizing
 FLOAT_CACHE_TTL = 86_400  # float doesn't change daily — cache 24 h
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")  # add credits at console.anthropic.com then paste key
+FINNHUB_API_KEY   = os.environ.get("FINNHUB_API_KEY", "")    # optional free news source — get a key at finnhub.io
 
 FILTERS = {
     "PRE":   {"min_change": 9.0,  "min_volume": 10_000,  "min_dollar_vol": 300_000,   "max_float_m": 100.0, "max_rsi": 78.0, "max_mcap_m": 300.0},
@@ -1993,7 +1994,7 @@ def fetch_finviz_raw(symbol: str) -> dict | None:
     try:
         r = _http.get(
             f"https://finviz.com/quote.ashx?t={symbol}&ty=c&ta=1&p=d",
-            timeout=15,
+            timeout=6,   # bounded so a slow Finviz scrape can't stall the scan
         )
         if r.status_code != 200:
             return None
@@ -2042,6 +2043,27 @@ def fetch_finviz_raw(symbol: str) -> dict | None:
         return None
 
 
+def fetch_finnhub_news(symbol: str) -> str | None:
+    """Recent company-news headline from Finnhub (free tier). Optional — only
+    runs if FINNHUB_API_KEY is set. Fast JSON API, not a scrape."""
+    if not FINNHUB_API_KEY:
+        return None
+    try:
+        today = datetime.now(EASTERN).strftime("%Y-%m-%d")
+        frm   = (datetime.now(EASTERN) - timedelta(days=3)).strftime("%Y-%m-%d")
+        r = _http.get("https://finnhub.io/api/v1/company-news",
+                      params={"symbol": symbol, "from": frm, "to": today,
+                              "token": FINNHUB_API_KEY}, timeout=6)
+        if r.status_code != 200:
+            return None
+        arts = r.json()
+        if isinstance(arts, list) and arts:
+            return ((arts[0].get("headline") or "").strip()[:120]) or None
+    except Exception:
+        return None
+    return None
+
+
 def fetch_stock_data(symbol: str) -> dict | None:
     """Webull + Finviz + Yahoo float all run in parallel."""
     with ThreadPoolExecutor(max_workers=3) as pool:
@@ -2082,6 +2104,12 @@ def fetch_stock_data(symbol: str) -> dict | None:
         if webull.get("obv_trend"):              data["obv_trend"]  = webull["obv_trend"]
         if webull.get("ignition"):               data["ignition"]   = webull["ignition"]
         if webull.get("change_pct") is not None: data["change_pct"] = webull["change_pct"]
+
+    # Finnhub news (free, optional) — fill in when Webull/Finviz gave no headline.
+    if FINNHUB_API_KEY and (not data.get("news") or data.get("news") in ("No recent news", "—", "")):
+        fh = fetch_finnhub_news(symbol)
+        if fh:
+            data["news"] = fh
 
     # Yahoo float fills gap when Webull fundamentals (417) and Finviz both fail
     if not data.get("float_m") and yf_float:
