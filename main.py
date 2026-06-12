@@ -13,6 +13,26 @@ Config via env vars: BOT_TOKEN, ANTHROPIC_API_KEY, DB_PATH (optional), PORT.
 
 NOTE: this file is the single source of truth. The original db.py /
 stock_scanner.py / dashboard.py were merged here and moved to archive/.
+
+═══════════════════════════════════════════════════════════════════════
+ MODULE MAP  (search the banner text to jump to a section)
+═══════════════════════════════════════════════════════════════════════
+   CONFIG ............. settings, FILTERS, strategy constants
+   DATABASE ........... SQLite layer (users, portfolio, trades, alerts, scan_log)
+   DATA FETCHING ...... Webull (price/volume/candles/news) + Yahoo/Finviz fallback
+   SCORING & GRADING .. RSI/MFI/OBV/EMA/VWAP/ignition + compute_grade
+   ALERT MESSAGE ...... alert builders + scale_out_plan (shared style)
+
+   ── THE 3 STRATEGIES (each self-contained) ──
+   A/B STRATEGY ....... run_scan + passes_filters + compute_grade  (main scan)
+   ORB STRATEGY ....... opening-range breakout, 1-min, first 90 min
+   GAP STRATEGY ....... gap-up-on-news → pullback to support
+
+   PORTFOLIO TRACKER .. stop/exit warnings on open positions
+   TELEGRAM COMMANDS .. /check /scan /status /backup /inflow /momentum ...
+   DASHBOARD .......... Dash web app (login + insights)
+   RUN ................ main() + schedule
+═══════════════════════════════════════════════════════════════════════
 """
 import os
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -3449,6 +3469,14 @@ def telegram_listener():
 
 # ═══════════════════════════════════════════════════════════════
 #  MAIN SCAN  (parallel)
+# ═══════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════
+#  A/B STRATEGY  (the main scan)
+#  passes_filters() = all the Balanced quality rules · compute_grade()
+#  = A/B grade · run_scan() = the loop that finds candidates, filters,
+#  grades, and broadcasts. This is the primary strategy; ORB and GAP
+#  are the two separate modules further below.
 # ═══════════════════════════════════════════════════════════════
 
 def passes_filters(stock: dict, fv: dict, f: dict) -> tuple:
