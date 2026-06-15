@@ -4421,7 +4421,7 @@ def main():
     schedule.every(20).minutes.do(check_alert_performance)   # resolve T1/T2/stop through the day
     schedule.every(1).minutes.do(orb_scan)                   # ORB breakouts — first 90 min only
     schedule.every(10).minutes.do(gap_scan)                  # gap-up-on-news pullback setups
-    schedule.every(15).minutes.do(ema_scan)                  # EMA100 breakout → target EMA200
+    # schedule.every(15).minutes.do(ema_scan)                # EMA100 — DISABLED for now. After week-1, drop the worst strategy and uncomment this to swap EMA in.
     while True:
         schedule.run_pending()
         time.sleep(5)    # scheduler tick — tighter so scans fire close to their scheduled minute
