@@ -728,6 +728,10 @@ GAP_LOOKBACK_DAYS = 6     # look for the gap day within the last N trading days
 GAP_ENTRY_ZONE    = 0.10  # entry when price is within this % above support
 GAP_MIN_UPSIDE    = 0.15  # target (prior peak) must be >= this % above current price
 gap_alerted       = set() # symbols already gap-alerted today (cleared in reset_daily)
+# ── EMA breakout (cross above EMA100 on volume+news, target EMA200) ──
+EMA_FAST          = 100   # break above this EMA = entry signal
+EMA_SLOW          = 200   # target = this EMA (must be above price = room to run)
+ema_alerted       = set() # symbols already EMA-alerted today (cleared in reset_daily)
 PORTFOLIO_SIZE  = 10_000  # default portfolio $ for position sizing
 FLOAT_CACHE_TTL = 86_400  # float doesn't change daily — cache 24 h
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")  # add credits at console.anthropic.com then paste key
@@ -3947,6 +3951,7 @@ def reset_daily():
         momentum_alerted.clear()
         orb_alerted.clear()
         gap_alerted.clear()
+        ema_alerted.clear()
     save_watchlist()
     log.info(f"[Daily Reset] watchlist_log + momentum cooldowns cleared ({count} entries) — fresh start for today")
 
@@ -4275,6 +4280,104 @@ def gap_scan():
         log.error(f"[GAP] scan error: {e}")
 
 
+# ═══════════════════════════════════════════════════════════════
+#  EMA BREAKOUT  (cross above EMA100 on volume+news, target EMA200)
+#  A daily-trend recovery: price reclaims the 100-EMA with a volume
+#  surge + catalyst, targeting the 200-EMA above it. Separate module;
+#  try/except so it can't break run_scan.
+# ═══════════════════════════════════════════════════════════════
+
+def detect_ema_breakout(symbol: str):
+    """Price just crossed ABOVE the 100-EMA (prev day below, today above) with the
+    200-EMA still above it (target), confirmed by high volume + a catalyst. Cheap
+    daily-bar EMA check first; expensive news/RelVol only on a geometry match."""
+    tid = fetch_webull_id(symbol)
+    if not tid:
+        return None
+    bars = fetch_daily_bars(tid, count=EMA_SLOW + 20)
+    closes = [b[2] for b in bars]
+    if len(closes) < EMA_SLOW:
+        return None
+    ema_f = calc_ema(closes, EMA_FAST)
+    ema_s = calc_ema(closes, EMA_SLOW)
+    if not ema_f or not ema_s:
+        return None
+    e_fast, e_slow = ema_f[-1], ema_s[-1]
+    price, prev = closes[-1], closes[-2]
+    if not (MIN_PRICE <= price <= MAX_PRICE):
+        return None
+    if not (prev <= e_fast < price):         # crossed above the 100-EMA today
+        return None
+    if e_slow <= price:                      # no upside room to the 200-EMA target
+        return None
+    # geometry matches — confirm volume + catalyst (expensive)
+    fv = fetch_stock_data(symbol)
+    if not fv:
+        return None
+    rv = fv.get("rel_vol")
+    if not (rv and rv >= 3):                 # high volume required
+        return None
+    if score_catalyst(fv.get("news", ""))[0] < 1:
+        return None
+    p = fv.get("price") or price
+    return {"symbol": symbol, "price": p, "ema100": e_fast, "ema200": e_slow,
+            "upside": round((e_slow - p) / p * 100, 1)}
+
+
+def build_ema_alert(sig: dict) -> str:
+    sym, price = sig["symbol"], sig["price"]
+    stop = round(sig["ema100"] * 0.98, 2)    # just below the 100-EMA
+    entry_lo = round(price * 0.99, 2)
+    entry_hi = round(price * 1.01, 2)
+    D = "━━━━━━━━━━━━━━━━━━━━"
+    return (
+        f"📈 <b>{sym}</b>   ${price:.2f}   EMA100 breakout\n"
+        f"Entry    ${entry_lo} – ${entry_hi}\n"
+        f"Stop     ${stop}   (below 100-EMA)\n"
+        f"{scale_out_plan(price)}\n"
+        f"🎯 Target ${sig['ema200']:.2f} (+{sig['upside']}% — 200-EMA)  ·  broke 100-EMA ${sig['ema100']:.2f}\n"
+        f"{D}\n"
+        f"💬 <code>/check {sym}</code> for full analysis"
+    )
+
+
+def ema_scan():
+    """EMA100-breakout hunter. Scans today's movers + recent alerts for a clean
+    cross above the 100-EMA toward the 200-EMA. Additive; try/except wrapped."""
+    try:
+        if get_session() is None:
+            return
+        watch = set()
+        try:
+            for a in db_get_recent_alerts(72):
+                watch.add(a["symbol"])
+        except Exception:
+            pass
+        for s in (fetch_screener_webull(FILTERS["OPEN"]) + fetch_gainers("OPEN")):
+            watch.add(s["symbol"])
+        syms = [s for s in watch if s not in ema_alerted][:MAX_CANDIDATES]
+        if not syms:
+            return
+        signals = []
+        with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as pool:
+            for sig in pool.map(detect_ema_breakout, syms):
+                if sig:
+                    signals.append(sig)
+        for sig in signals:
+            ema_alerted.add(sig["symbol"])
+            broadcast(build_ema_alert(sig))
+            if DB_OK:
+                db_log_alert(symbol=sig["symbol"], price=sig["price"], grade="EMA",
+                             change_pct=0.0, float_m=None, rsi=None, volume=None,
+                             rel_vol=None, mcap_m=None, session="EMA")
+            log.info(f"  [EMA] {sig['symbol']} broke 100-EMA ${sig['ema100']:.2f} "
+                     f"→ target 200-EMA ${sig['ema200']:.2f} (+{sig['upside']}%)")
+        if signals:
+            log.info(f"[EMA] {len(signals)} breakout(s) sent")
+    except Exception as e:
+        log.error(f"[EMA] scan error: {e}")
+
+
 def main():
     if not acquire_lock():
         sys.exit(1)
@@ -4318,6 +4421,7 @@ def main():
     schedule.every(20).minutes.do(check_alert_performance)   # resolve T1/T2/stop through the day
     schedule.every(1).minutes.do(orb_scan)                   # ORB breakouts — first 90 min only
     schedule.every(10).minutes.do(gap_scan)                  # gap-up-on-news pullback setups
+    schedule.every(15).minutes.do(ema_scan)                  # EMA100 breakout → target EMA200
     while True:
         schedule.run_pending()
         time.sleep(5)    # scheduler tick — tighter so scans fire close to their scheduled minute
@@ -5111,7 +5215,7 @@ def page_insights(auth, lang="en"):
     wr_rows = []
     if alerted and "grade" in al.columns and "outcome" in al.columns:
         ev = al[al["outcome"].isin(["PASS", "FAIL"])]   # resolved win/loss only
-        for grade in ["A", "B", "ORB", "GAP"]:
+        for grade in ["A", "B", "ORB", "GAP", "EMA"]:
             sub = ev[ev["grade"] == grade]
             if len(sub):
                 wins = int((sub["outcome"] == "PASS").sum())
