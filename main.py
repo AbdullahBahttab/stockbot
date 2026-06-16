@@ -698,6 +698,7 @@ LOG_FILE       = os.path.join(BASE_DIR, "scanner.log")
 MIN_PRICE       = 5.0     # Balanced floor — blocks sub-$5 pump-and-dump junk (JEM/CLWT/SMSI)
 MAX_PRICE       = 65.0
 MAX_CHANGE_PCT  = 40.0    # don't alert stocks already up more than this % — too extended, they fade
+MIN_FLOAT_M     = 2.0     # reject nano-floats below this (M shares) — pump-and-dump risk (ASBP 1.3M, SDOT 0.74M)
 SCAN_EVERY_MIN  = 1      # scan every minute — faster reaction (was 2)
 ALERT_COOLDOWN  = 1800    # seconds before same stock can re-alert
 
@@ -3518,6 +3519,8 @@ def passes_filters(stock: dict, fv: dict, f: dict) -> tuple:
     if mfi and mfi >= 85:                 return False, f"MFI {mfi:.0f} >= 85 — money flow exhausted"
     if flt is None and mc and mc > 100:   return False, f"no float, mcap ${mc:.0f}M too large"
     if mc and mc < 1:                     return False, f"nano-cap ${mc:.1f}M"
+    if flt is not None and flt < MIN_FLOAT_M:
+                                          return False, f"nano-float {flt:.1f}M < {MIN_FLOAT_M:.0f}M — pump-and-dump risk (ASBP/SDOT type)"
     vwap = fv.get("vwap")
     if vwap and vwap > 0:
         vwap_limit = 1.2 if (fv.get("rsi_source") == "daily" and chg > 100) else 1.38
