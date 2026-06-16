@@ -3503,9 +3503,13 @@ def passes_filters(stock: dict, fv: dict, f: dict) -> tuple:
     # bypassed by high rel-volume: a tiny-float stock always shows huge rel-vol
     # while barely any money trades, so you get stuck with no buyers on exit.
     dollar_vol = (p or 0) * (vol or 0)
-    if vol and dollar_vol < f.get("min_dollar_vol", 0):
+    # MANDATORY liquidity floor — reject if volume is missing/zero (can't confirm
+    # you could exit) OR dollar-volume is below the floor. The old "if vol and ..."
+    # let stocks with missing volume data slip through (e.g. ASBP: 12k shares,
+    # $71k $-vol, 1.3M nano-float — impossible to sell).
+    if not vol or dollar_vol < f.get("min_dollar_vol", 0):
                                           return False, (f"thin liquidity ${dollar_vol/1e6:.2f}M $-vol "
-                                                         f"< ${f['min_dollar_vol']/1e6:.1f}M — no buyers to exit safely")
+                                                         f"(vol {int(vol or 0):,}) < ${f['min_dollar_vol']/1e6:.1f}M — can't exit safely")
     if rsi is None:
         if cat_pts < 2:                   return False, "RSI unknown — no strong catalyst to verify momentum"
     if rsi and rsi > f["max_rsi"]:        return False, f"RSI {rsi:.0f} > {f['max_rsi']:.0f} — parabolic"
