@@ -720,7 +720,7 @@ MAX_CANDIDATES  = 40      # max stocks enriched per scan (screener can return ma
 ORB_RANGE_MIN   = 12      # opening range = high/low of the first 12 minutes (Balanced)
 ORB_WINDOW_END  = 11*60   # stop hunting breakouts after 11:00 ET (90 min post-open)
 ORB_MIN_RVOL    = 3.2     # breakout bar must have >= this x the opening-range avg volume (Balanced)
-ORB_VWAP_LIMIT  = 1.38    # breakout price must be <= this x VWAP (not over-extended)
+ORB_VWAP_LIMIT  = 1.45    # breakout price must be <= this x VWAP (not over-extended)
 orb_alerted     = set()   # symbols already ORB-alerted today (cleared in reset_daily)
 # ── Gap-Pullback (gap-up-on-news, then buy the pullback to support) ──
 GAP_MIN_PCT       = 15.0  # the prior 'gap' day must have run up >= this %
@@ -3523,10 +3523,10 @@ def passes_filters(stock: dict, fv: dict, f: dict) -> tuple:
                                           return False, f"nano-float {flt:.1f}M < {MIN_FLOAT_M:.0f}M — pump-and-dump risk (ASBP/SDOT type)"
     vwap = fv.get("vwap")
     if vwap and vwap > 0:
-        vwap_limit = 1.2 if (fv.get("rsi_source") == "daily" and chg > 100) else 1.38
+        vwap_limit = 1.25 if (fv.get("rsi_source") == "daily" and chg > 100) else 1.45
         if p > vwap * vwap_limit:         return False, f"price ${p:.2f} > {vwap_limit}x VWAP ${vwap:.2f} — over-extended, will fade"
     if rv and rv < 0.5 and chg > 50:      return False, f"dying volume RelVol={rv:.1f}x"
-    if rv is not None and 0 < rv < 3.0:   return False, f"RelVol {rv:.1f}x < 3x — not enough volume (Balanced)"
+    if rv is not None and 0 < rv < 2.8:   return False, f"RelVol {rv:.1f}x < 2.8x — not enough volume"
     h, l      = fv.get("high"), fv.get("low")
     obv       = fv.get("obv_trend", "→")
     pos       = (p - l) / (h - l) if (h and l and h != l) else None
