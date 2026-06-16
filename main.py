@@ -4088,6 +4088,18 @@ def detect_orb(symbol: str):
     if vwap and price > vwap * ORB_VWAP_LIMIT:
         return None
     if price > or_high and prev[2] <= or_high and vol >= or_vol * ORB_MIN_RVOL:
+        # safety floor (ORB skips passes_filters) — verify real liquidity + not a
+        # nano-float, only now that a breakout is confirmed (rare → little extra load).
+        fv = fetch_stock_data(symbol)
+        if not fv:
+            return None
+        f   = FILTERS.get(get_session() or "OPEN", FILTERS["OPEN"])
+        dv  = (fv.get("volume") or 0) * (fv.get("price") or price)
+        flt = fv.get("float_m")
+        if not fv.get("volume") or dv < f["min_dollar_vol"]:
+            return None
+        if flt is not None and flt < MIN_FLOAT_M:
+            return None
         return {"symbol": symbol, "price": price, "or_high": or_high,
                 "or_low": or_low, "rvol": round(vol / or_vol, 1)}
     return None
@@ -4228,6 +4240,14 @@ def detect_gap_pullback(symbol: str):
     if not fv or score_catalyst(fv.get("news", ""))[0] < 1:
         return None
     p = fv.get("price") or price
+    # Same safety floors as the A/B scan (GAP skips passes_filters, so apply here):
+    # real liquidity (can exit) + not a nano-float pump (ASBP/SDOT).
+    vol = fv.get("volume"); flt = fv.get("float_m")
+    f   = FILTERS.get(get_session() or "OPEN", FILTERS["OPEN"])
+    if not vol or (p * vol) < f["min_dollar_vol"]:
+        return None
+    if flt is not None and flt < MIN_FLOAT_M:
+        return None
     return {"symbol": symbol, "price": p, "support": support,
             "peak": peak, "upside": round((peak - p) / p * 100, 1)}
 
