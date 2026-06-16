@@ -3476,6 +3476,21 @@ def telegram_listener():
 #  MAIN SCAN  (parallel)
 # ═══════════════════════════════════════════════════════════════
 
+def passes_safety_floors(fv: dict, price: float, f: dict) -> tuple:
+    """Safety floors shared by ALL strategies (A/B, GAP, ORB): real liquidity
+    (you can actually sell) + not a nano-float pump. Change it here once and it
+    applies to every strategy. Returns (ok: bool, reason: str)."""
+    vol  = fv.get("volume")
+    flt  = fv.get("float_m")
+    dvol = (price or 0) * (vol or 0)
+    if not vol or dvol < f.get("min_dollar_vol", 0):
+        return False, (f"thin liquidity ${dvol/1e6:.2f}M $-vol (vol {int(vol or 0):,}) "
+                       f"< ${f.get('min_dollar_vol', 0)/1e6:.1f}M — can't exit safely")
+    if flt is not None and flt < MIN_FLOAT_M:
+        return False, f"nano-float {flt:.1f}M < {MIN_FLOAT_M:.0f}M — pump-and-dump risk (ASBP/SDOT type)"
+    return True, ""
+
+
 # ═══════════════════════════════════════════════════════════════
 #  A/B STRATEGY  (the main scan)
 #  passes_filters() = all the Balanced quality rules · compute_grade()
@@ -3500,17 +3515,9 @@ def passes_filters(stock: dict, fv: dict, f: dict) -> tuple:
     if chg > MAX_CHANGE_PCT:              return False, f"already up {chg:.0f}% — too extended to chase (fades after alert)"
     if vol and vol < f["min_volume"] and not (rv and rv > 15):
                                           return False, f"vol {vol:,} < {f['min_volume']:,}"
-    # Hard liquidity floor — absolute $-volume (price x shares). Cannot be
-    # bypassed by high rel-volume: a tiny-float stock always shows huge rel-vol
-    # while barely any money trades, so you get stuck with no buyers on exit.
-    dollar_vol = (p or 0) * (vol or 0)
-    # MANDATORY liquidity floor — reject if volume is missing/zero (can't confirm
-    # you could exit) OR dollar-volume is below the floor. The old "if vol and ..."
-    # let stocks with missing volume data slip through (e.g. ASBP: 12k shares,
-    # $71k $-vol, 1.3M nano-float — impossible to sell).
-    if not vol or dollar_vol < f.get("min_dollar_vol", 0):
-                                          return False, (f"thin liquidity ${dollar_vol/1e6:.2f}M $-vol "
-                                                         f"(vol {int(vol or 0):,}) < ${f['min_dollar_vol']/1e6:.1f}M — can't exit safely")
+    # Safety floors (liquidity + nano-float) — shared by all 3 strategies.
+    _ok, _why = passes_safety_floors(fv, p, f)
+    if not _ok:                           return False, _why
     if rsi is None:
         if cat_pts < 2:                   return False, "RSI unknown — no strong catalyst to verify momentum"
     if rsi and rsi > f["max_rsi"]:        return False, f"RSI {rsi:.0f} > {f['max_rsi']:.0f} — parabolic"
@@ -3519,8 +3526,6 @@ def passes_filters(stock: dict, fv: dict, f: dict) -> tuple:
     if mfi and mfi >= 85:                 return False, f"MFI {mfi:.0f} >= 85 — money flow exhausted"
     if flt is None and mc and mc > 100:   return False, f"no float, mcap ${mc:.0f}M too large"
     if mc and mc < 1:                     return False, f"nano-cap ${mc:.1f}M"
-    if flt is not None and flt < MIN_FLOAT_M:
-                                          return False, f"nano-float {flt:.1f}M < {MIN_FLOAT_M:.0f}M — pump-and-dump risk (ASBP/SDOT type)"
     vwap = fv.get("vwap")
     if vwap and vwap > 0:
         vwap_limit = 1.25 if (fv.get("rsi_source") == "daily" and chg > 100) else 1.45
@@ -4093,12 +4098,8 @@ def detect_orb(symbol: str):
         fv = fetch_stock_data(symbol)
         if not fv:
             return None
-        f   = FILTERS.get(get_session() or "OPEN", FILTERS["OPEN"])
-        dv  = (fv.get("volume") or 0) * (fv.get("price") or price)
-        flt = fv.get("float_m")
-        if not fv.get("volume") or dv < f["min_dollar_vol"]:
-            return None
-        if flt is not None and flt < MIN_FLOAT_M:
+        _f = FILTERS.get(get_session() or "OPEN", FILTERS["OPEN"])
+        if not passes_safety_floors(fv, fv.get("price") or price, _f)[0]:
             return None
         return {"symbol": symbol, "price": price, "or_high": or_high,
                 "or_low": or_low, "rvol": round(vol / or_vol, 1)}
@@ -4240,13 +4241,9 @@ def detect_gap_pullback(symbol: str):
     if not fv or score_catalyst(fv.get("news", ""))[0] < 1:
         return None
     p = fv.get("price") or price
-    # Same safety floors as the A/B scan (GAP skips passes_filters, so apply here):
-    # real liquidity (can exit) + not a nano-float pump (ASBP/SDOT).
-    vol = fv.get("volume"); flt = fv.get("float_m")
-    f   = FILTERS.get(get_session() or "OPEN", FILTERS["OPEN"])
-    if not vol or (p * vol) < f["min_dollar_vol"]:
-        return None
-    if flt is not None and flt < MIN_FLOAT_M:
+    # Safety floors (liquidity + nano-float) — shared with A/B and ORB.
+    _f = FILTERS.get(get_session() or "OPEN", FILTERS["OPEN"])
+    if not passes_safety_floors(fv, p, _f)[0]:
         return None
     return {"symbol": symbol, "price": p, "support": support,
             "peak": peak, "upside": round((peak - p) / p * 100, 1)}
