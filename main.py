@@ -3488,6 +3488,9 @@ def passes_safety_floors(fv: dict, price: float, f: dict) -> tuple:
                        f"< ${f.get('min_dollar_vol', 0)/1e6:.1f}M — can't exit safely")
     if flt is not None and flt < MIN_FLOAT_M:
         return False, f"nano-float {flt:.1f}M < {MIN_FLOAT_M:.0f}M — pump-and-dump risk (ASBP/SDOT type)"
+    chg = fv.get("change_pct")
+    if chg is not None and chg > MAX_CHANGE_PCT:
+        return False, f"already up {chg:.0f}% — too extended, parabolic crash risk (SLBT type)"
     return True, ""
 
 
