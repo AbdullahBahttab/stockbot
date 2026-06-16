@@ -4029,14 +4029,14 @@ def check_alert_performance():
 #  any error here is caught so it can never break the main scanner.
 # ═══════════════════════════════════════════════════════════════
 
-def fetch_m1_bars(tid: str, count: int = 120) -> list:
-    """1-minute OHLCV bars for a Webull tickerId, oldest-first:
-    list of (ts, open, close, high, low, volume, vwap)."""
+def _fetch_ohlcv(tid: str, bar_type: str, count: int, with_vwap: bool = False) -> list:
+    """Webull OHLCV bars for a tickerId, oldest-first:
+    (ts, open, close, high, low, volume[, vwap]). Shared by the m1/d1 fetchers."""
     try:
         with _wb_semaphore:
             r = _wb_http.get(
                 "https://quotes-gw.webullfintech.com/api/quote/charts/query",
-                params={"tickerIds": tid, "type": "m1", "count": count}, timeout=10)
+                params={"tickerIds": tid, "type": bar_type, "count": count}, timeout=10)
         if r.status_code != 200:
             return []
         body = r.json()
@@ -4046,15 +4046,22 @@ def fetch_m1_bars(tid: str, count: int = 120) -> list:
             p = str(row).split(",")          # ts,open,close,high,low,preClose,volume,vwap
             if len(p) >= 7:
                 try:
-                    bars.append((int(p[0]), float(p[1]), float(p[2]),
-                                 float(p[3]), float(p[4]), float(p[6]),
-                                 float(p[7]) if len(p) > 7 and p[7] else 0.0))
+                    bar = (int(p[0]), float(p[1]), float(p[2]),
+                           float(p[3]), float(p[4]), float(p[6]))
+                    if with_vwap:
+                        bar += (float(p[7]) if len(p) > 7 and p[7] else 0.0,)
+                    bars.append(bar)
                 except (ValueError, IndexError):
                     continue
         bars.reverse()                       # Webull returns newest-first
         return bars
     except Exception:
         return []
+
+
+def fetch_m1_bars(tid: str, count: int = 120) -> list:
+    """1-minute OHLCV+vwap bars, oldest-first."""
+    return _fetch_ohlcv(tid, "m1", count, with_vwap=True)
 
 
 def opening_range(bars: list):
@@ -4179,29 +4186,8 @@ def orb_scan():
 # ═══════════════════════════════════════════════════════════════
 
 def fetch_daily_bars(tid: str, count: int = 12) -> list:
-    """Daily OHLCV bars, oldest-first: (ts, open, close, high, low, volume)."""
-    try:
-        with _wb_semaphore:
-            r = _wb_http.get(
-                "https://quotes-gw.webullfintech.com/api/quote/charts/query",
-                params={"tickerIds": tid, "type": "d1", "count": count}, timeout=10)
-        if r.status_code != 200:
-            return []
-        body = r.json()
-        rows = body[0].get("data", []) if isinstance(body, list) and body else []
-        bars = []
-        for row in rows:
-            p = str(row).split(",")
-            if len(p) >= 7:
-                try:
-                    bars.append((int(p[0]), float(p[1]), float(p[2]),
-                                 float(p[3]), float(p[4]), float(p[6])))
-                except (ValueError, IndexError):
-                    continue
-        bars.reverse()
-        return bars
-    except Exception:
-        return []
+    """Daily OHLCV bars, oldest-first."""
+    return _fetch_ohlcv(tid, "d1", count)
 
 
 def detect_gap_pullback(symbol: str):
@@ -4267,21 +4253,27 @@ def build_gap_alert(sig: dict) -> str:
     )
 
 
+def _gather_candidates(exclude: set) -> list:
+    """Candidate symbols for the GAP/EMA scans: recently-alerted gappers + today's
+    movers (screener + gainers), minus `exclude`, capped at MAX_CANDIDATES."""
+    watch = set()
+    try:
+        for a in db_get_recent_alerts(72):
+            watch.add(a["symbol"])
+    except Exception:
+        pass
+    for s in (fetch_screener_webull(FILTERS["OPEN"]) + fetch_gainers("OPEN")):
+        watch.add(s["symbol"])
+    return [s for s in watch if s not in exclude][:MAX_CANDIDATES]
+
+
 def gap_scan():
     """Gap-pullback hunter. Scans recently-alerted gappers + today's movers and
     alerts when one has pulled back to support. Additive; wrapped in try/except."""
     try:
         if get_session() is None:
             return
-        watch = set()
-        try:
-            for a in db_get_recent_alerts(72):
-                watch.add(a["symbol"])
-        except Exception:
-            pass
-        for s in (fetch_screener_webull(FILTERS["OPEN"]) + fetch_gainers("OPEN")):
-            watch.add(s["symbol"])
-        syms = [s for s in watch if s not in gap_alerted][:MAX_CANDIDATES]
+        syms = _gather_candidates(gap_alerted)
         if not syms:
             return
         signals = []
@@ -4371,15 +4363,7 @@ def ema_scan():
     try:
         if get_session() is None:
             return
-        watch = set()
-        try:
-            for a in db_get_recent_alerts(72):
-                watch.add(a["symbol"])
-        except Exception:
-            pass
-        for s in (fetch_screener_webull(FILTERS["OPEN"]) + fetch_gainers("OPEN")):
-            watch.add(s["symbol"])
-        syms = [s for s in watch if s not in ema_alerted][:MAX_CANDIDATES]
+        syms = _gather_candidates(ema_alerted)
         if not syms:
             return
         signals = []
