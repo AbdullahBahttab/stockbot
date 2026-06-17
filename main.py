@@ -695,11 +695,10 @@ ALERTED_FILE   = os.path.join(BASE_DIR, "alerted.json")
 TRACKED_FILE   = os.path.join(BASE_DIR, "tracked.json")
 LOG_FILE       = os.path.join(BASE_DIR, "scanner.log")
 
-MIN_PRICE       = 5.0     # Balanced floor — blocks sub-$5 pump-and-dump junk (JEM/CLWT/SMSI)
+MIN_PRICE       = 1.5     # unified floor for ALL strategies (user) — float + liquidity floors do the heavy lifting now
 MAX_PRICE       = 65.0
 MAX_CHANGE_PCT  = 40.0    # don't alert stocks already up more than this % — too extended, they fade
 MIN_FLOAT_M     = 2.0     # reject nano-floats below this (M shares) — pump-and-dump risk (ASBP 1.3M, SDOT 0.74M)
-GAP_EMA_MIN_PRICE = 1.5   # GAP & EMA use a LOWER price floor than A/B/ORB (user test) — float+liquidity floors still protect
 SCAN_EVERY_MIN  = 1      # scan every minute — faster reaction (was 2)
 ALERT_COOLDOWN  = 1800    # seconds before same stock can re-alert
 
@@ -4204,7 +4203,7 @@ def detect_gap_pullback(symbol: str):
     if len(bars) < 3:
         return None
     price = bars[-1][2]                      # today's current/close
-    if not (GAP_EMA_MIN_PRICE <= price <= MAX_PRICE):
+    if not (MIN_PRICE <= price <= MAX_PRICE):
         return None
     # find the 'gap candle' — biggest run-up day among the prior days (exclude today)
     recent = bars[:-1][-GAP_LOOKBACK_DAYS:]
@@ -4324,7 +4323,7 @@ def detect_ema_breakout(symbol: str):
         return None
     e_fast, e_slow = ema_f[-1], ema_s[-1]
     price, prev = closes[-1], closes[-2]
-    if not (GAP_EMA_MIN_PRICE <= price <= MAX_PRICE):
+    if not (MIN_PRICE <= price <= MAX_PRICE):
         return None
     if not (prev <= e_fast < price):         # crossed above the 100-EMA today
         return None
