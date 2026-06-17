@@ -3992,6 +3992,10 @@ def check_alert_performance():
         sym         = a["symbol"]
         alert_price = float(a["alert_price"])
         grade       = a.get("grade", "")
+        # EMA is a multi-day SWING setup — the +5%/30-min scalp metric can't judge it
+        # (it would falsely mark it FAIL). Skip; judge EMA manually over days.
+        if grade == "EMA":
+            continue
         # alerted_at is a UTC string from SQLite datetime('now'); bar ts are UTC epoch.
         try:
             dt = datetime.strptime(str(a["alerted_at"])[:19], "%Y-%m-%d %H:%M:%S")
@@ -4349,16 +4353,19 @@ def detect_ema_breakout(symbol: str):
 
 def build_ema_alert(sig: dict) -> str:
     sym, price = sig["symbol"], sig["price"]
-    stop = round(sig["ema100"] * 0.98, 2)    # just below the 100-EMA
+    stop     = round(sig["ema100"] * 0.98, 2)    # just below the 100-EMA
+    stop_pct = round((price - stop) / price * 100, 1) if price else 0.0
     entry_lo = round(price * 0.99, 2)
     entry_hi = round(price * 1.01, 2)
     D = "━━━━━━━━━━━━━━━━━━━━"
+    # EMA is a SWING setup (plays out over days) — no scalp scale-out here.
     return (
-        f"📈 <b>{sym}</b>   ${price:.2f}   EMA100 breakout\n"
+        f"📈 <b>{sym}</b>   ${price:.2f}   EMA100 breakout (swing)\n"
         f"Entry    ${entry_lo} – ${entry_hi}\n"
-        f"Stop     ${stop}   (below 100-EMA)\n"
-        f"{scale_out_plan(price)}\n"
-        f"🎯 Target ${sig['ema200']:.2f} (+{sig['upside']}% — 200-EMA)  ·  broke 100-EMA ${sig['ema100']:.2f}\n"
+        f"Stop     ${stop}   -{stop_pct}%   (just below the 100-EMA)\n"
+        f"🎯 Target ${sig['ema200']:.2f}   (+{sig['upside']}% — the 200-EMA)\n"
+        f"⏳ Swing trade — give it DAYS to reach the 200-EMA, not minutes.\n"
+        f"📊 broke 100-EMA ${sig['ema100']:.2f}\n"
         f"{D}\n"
         f"💬 <code>/check {sym}</code> for full analysis"
     )
