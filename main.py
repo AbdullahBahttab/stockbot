@@ -4249,12 +4249,14 @@ def build_gap_alert(sig: dict) -> str:
     entry_lo = round(price * 0.99, 2)
     entry_hi = round(price * 1.01, 2)
     D = "━━━━━━━━━━━━━━━━━━━━"
+    # GAP is a short SWING / bounce play (hold hours toward the prior peak) — no scalp scale-out.
     return (
-        f"🎯 <b>{sym}</b>   ${price:.2f}   GAP pullback\n"
+        f"🎯 <b>{sym}</b>   ${price:.2f}   GAP pullback (bounce)\n"
         f"Entry    ${entry_lo} – ${entry_hi}\n"
-        f"Stop     ${stop}   -{stop_pct}%  (below support)\n"
-        f"{scale_out_plan(price)}\n"
-        f"🎯 Stretch ${sig['peak']:.2f} (+{sig['upside']}% prior peak)  ·  support ${sig['support']:.2f}\n"
+        f"Stop     ${stop}   -{stop_pct}%   (below support — exit if it breaks)\n"
+        f"🎯 Target ${sig['peak']:.2f}   (+{sig['upside']}% — the prior peak)\n"
+        f"⏳ Bounce play — hold for the move back toward the peak (hours), not a quick scalp.\n"
+        f"📊 pulled back to support ${sig['support']:.2f} after a news gap\n"
         f"{D}\n"
         f"💬 <code>/check {sym}</code> for full analysis"
     )
