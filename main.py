@@ -4425,14 +4425,15 @@ def main():
         f"Send /help for all commands"
     )
 
-    run_scan()
-    schedule.every(SCAN_EVERY_MIN).minutes.do(run_scan)
+    # run_scan()  # A/B DISABLED — worst strategy (8-16% win, fades, barely fires). /scan still runs it manually.
+    # schedule.every(SCAN_EVERY_MIN).minutes.do(run_scan)
+    schedule.every(2).minutes.do(check_portfolio)            # keep stop-loss/exit monitoring alive (it used to run inside run_scan)
     schedule.every(15).minutes.do(reset_stale_cooldowns)
     schedule.every().day.at("09:25").do(reset_daily)        # ET — clear yesterday's alerts before open
     schedule.every(20).minutes.do(check_alert_performance)   # resolve T1/T2/stop through the day
     schedule.every(1).minutes.do(orb_scan)                   # ORB breakouts — first 90 min only
     schedule.every(10).minutes.do(gap_scan)                  # gap-up-on-news pullback setups
-    # schedule.every(15).minutes.do(ema_scan)                # EMA100 — DISABLED for now. After week-1, drop the worst strategy and uncomment this to swap EMA in.
+    schedule.every(15).minutes.do(ema_scan)                  # EMA100 breakout — ENABLED (swapped in for A/B)
     while True:
         schedule.run_pending()
         time.sleep(5)    # scheduler tick — tighter so scans fire close to their scheduled minute
