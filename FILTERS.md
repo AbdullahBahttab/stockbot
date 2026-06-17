@@ -86,6 +86,8 @@ Quality rules (`passes_filters`):
 - Target must be **≥ 15%** above current price (`GAP_MIN_UPSIDE`)
 - **Catalyst required** (positive news)
 - \+ universal safety floors
+- 🎯 **Short SWING / bounce play** — stop below support, target the **prior peak**,
+  **hold hours** for the bounce (not a quick scalp; no scale-out).
 
 ---
 
@@ -113,8 +115,9 @@ How each alert is scored automatically (fits the intraday strategies — A/B, OR
 - **FAIL** = hit the **−7%** stop, or no +5% within 30 minutes (`ALERT_STOP_PCT`)
 - **EMA is excluded** — it's a multi-day swing, so the 30-min metric can't score it; judge it manually over days.
 
-> The scale-out plan below applies to the **scalp** strategies (A/B, ORB, GAP).
-> **EMA uses swing exits instead:** stop below the 100-EMA, target the 200-EMA, held over days.
+> The scale-out plan below applies to the **scalp** strategies (A/B, ORB).
+> **GAP** uses bounce exits: stop below support, target the prior peak, held hours.
+> **EMA** uses swing exits: stop below the 100-EMA, target the 200-EMA, held over days.
 
 ## 🎯 Suggested exit plan (shown on every alert)
 
