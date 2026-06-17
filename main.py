@@ -4339,6 +4339,10 @@ def detect_ema_breakout(symbol: str):
     if score_catalyst(fv.get("news", ""))[0] < 1:
         return None
     p = fv.get("price") or price
+    # Safety floors (liquidity + nano-float + over-extension) — shared with A/B, GAP, ORB.
+    _f = FILTERS.get(get_session() or "OPEN", FILTERS["OPEN"])
+    if not passes_safety_floors(fv, p, _f)[0]:
+        return None
     return {"symbol": symbol, "price": p, "ema100": e_fast, "ema200": e_slow,
             "upside": round((e_slow - p) / p * 100, 1)}
 
