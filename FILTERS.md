@@ -72,7 +72,7 @@ Quality rules (`passes_filters`):
 - Window: **9:45 – 11:00 ET only** · uses **1-minute** bars
 - Opening range = high/low of the first **12 minutes** (`ORB_RANGE_MIN`)
 - **Breakout:** latest bar closes **above the OR high** (previous bar did not)
-- **Volume surge ≥ 3.2×** the opening-range average (`ORB_MIN_RVOL`)
+- **Volume surge ≥ 2.5×** the opening-range average (`ORB_MIN_RVOL`)
 - **VWAP ≤ 1.45×** (`ORB_VWAP_LIMIT`)
 - \+ universal safety floors
 

@@ -719,7 +719,7 @@ MAX_CANDIDATES  = 40      # max stocks enriched per scan (screener can return ma
 # ── ORB (Opening Range Breakout) — separate fast 1-minute module ──
 ORB_RANGE_MIN   = 12      # opening range = high/low of the first 12 minutes (Balanced)
 ORB_WINDOW_END  = 11*60   # stop hunting breakouts after 11:00 ET (90 min post-open)
-ORB_MIN_RVOL    = 3.2     # breakout bar must have >= this x the opening-range avg volume (Balanced)
+ORB_MIN_RVOL    = 2.5     # breakout bar must have >= this x the opening-range avg volume (loosened 3.2→2.5 to fire more)
 ORB_VWAP_LIMIT  = 1.45    # breakout price must be <= this x VWAP (not over-extended)
 orb_alerted     = set()   # symbols already ORB-alerted today (cleared in reset_daily)
 # ── Gap-Pullback (gap-up-on-news, then buy the pullback to support) ──
