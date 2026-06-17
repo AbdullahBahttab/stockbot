@@ -94,9 +94,12 @@ Quality rules (`passes_filters`):
 - **EMA 100 & EMA 200, on the daily timeframe** (`EMA_FAST` / `EMA_SLOW`)
 - **Entry:** price **crosses above the 100-EMA** (prev day below, today above)
 - **Target:** the **200-EMA** (must be above price = room to run)
-- **Stop:** just below the 100-EMA
+- **Stop:** just below the 100-EMA · **Target:** the 200-EMA
 - **RelVol ≥ 3** + **catalyst** required
 - \+ universal safety floors
+- ⏳ **This is a multi-day SWING** — it plays out over *days*, not minutes. No scalp
+  scale-out; hold toward the 200-EMA. It is **excluded from the +5%/30-min scoring**
+  (that scalp metric can't judge a swing) — **judge EMA manually over days.**
 
 **To replicate in Webull:** open the **Daily** chart, add **EMA 100** and **EMA 200**,
 and watch for a volume-backed break above the 100 toward the 200.
@@ -105,9 +108,13 @@ and watch for a volume-backed break above the 100 toward the 200.
 
 ## 🎯 Alert outcome tracking (dashboard win-rate)
 
-How each alert is scored automatically:
+How each alert is scored automatically (fits the intraday strategies — A/B, ORB, GAP):
 - **PASS** = hit **+5%** (T1) or **+10%** (T2) within **30 minutes** (`ALERT_T1_PCT` / `ALERT_T2_PCT` / `ALERT_OPEN_MIN`)
 - **FAIL** = hit the **−7%** stop, or no +5% within 30 minutes (`ALERT_STOP_PCT`)
+- **EMA is excluded** — it's a multi-day swing, so the 30-min metric can't score it; judge it manually over days.
+
+> The scale-out plan below applies to the **scalp** strategies (A/B, ORB, GAP).
+> **EMA uses swing exits instead:** stop below the 100-EMA, target the 200-EMA, held over days.
 
 ## 🎯 Suggested exit plan (shown on every alert)
 
