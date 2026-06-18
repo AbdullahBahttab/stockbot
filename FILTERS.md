@@ -32,8 +32,9 @@ Change these in **one place** and it applies to A/B, ORB, GAP, and EMA.
 - **Price:** $1.50 – $65  (`MIN_PRICE` / `MAX_PRICE`)
 - **Liquidity:** dollar-volume ≥ session floor, and volume must be present
   - PRE $300k · **OPEN $2,000,000** · AFTER $500k  (`min_dollar_vol`)
-- **Nano-float reject:** float must be **≥ 2M shares**  (`MIN_FLOAT_M`)
+- **Float band:** **2M – 100M shares**  (`MIN_FLOAT_M` / `MAX_FLOAT_M`) — rejects nano-float pumps *and* heavy large-caps; now universal (was A/B-only)
 - **Over-extension reject:** change must be **≤ 40%**  (`MAX_CHANGE_PCT`)
+- **VWAP extension:** **≤ 1.45×** (`VWAP_LIMIT`; 1.25× parabolic) — shared by A/B + ORB
 
 > These three floors are what block the disaster patterns: illiquid (ASBP),
 > nano-float pumps (SDOT), and parabolic crashes (SLBT).
