@@ -3,8 +3,9 @@
 Complete reference of every indicator and filter the bot uses. Values reflect the
 current live config. Set the EMAs on a **daily** Webull chart to match the EMA strategy.
 
-**Active strategies:** 🚀 ORB · 🎯 GAP · 📈 EMA  ·  🥇🥈 A/B is currently **benched**
-(its `run_scan` schedule is commented out; `/scan` still runs it manually).
+**Active strategies:** 🎯 GAP · 📈 EMA  ·  **benched:** 🥇🥈 A/B (`/scan` runs it manually)
+and 🚀 ORB (disabled 2026-06-18 — 0 alerts all week even after loosening vol to 2.5×;
+code kept, re-enable by uncommenting its schedule line).
 
 ---
 
