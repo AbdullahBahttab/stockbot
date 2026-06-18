@@ -56,9 +56,9 @@ Quality rules (`passes_filters`):
 - Volume ≥ session floor (bypassed only if RelVol > 15)
 - **RSI 52 – 78** (reject < 52 fading, > 78 parabolic)
 - **MFI < 85**
-- **VWAP ≤ 1.45×** (1.25× for daily-RSI parabolic case)
+- **VWAP ≤ 1.45×** (`VWAP_LIMIT`; 1.25× `VWAP_LIMIT_PARABOLIC` for the daily-RSI parabolic case)
 - **RelVol ≥ 2.8×**
-- **Float 2M – 100M**
+- **Float 2M – 100M** (now enforced by the universal floors above, not just here)
 - Market cap: reject nano-cap < $1M; reject no-float + mcap > 100M
 - **Day-range position ≤ 75%** (don't buy near the day high)
 - **"Already dumped" reject:** price not > 25% below the day high
@@ -74,8 +74,8 @@ Quality rules (`passes_filters`):
 - Opening range = high/low of the first **12 minutes** (`ORB_RANGE_MIN`)
 - **Breakout:** latest bar closes **above the OR high** (previous bar did not)
 - **Volume surge ≥ 2.5×** the opening-range average (`ORB_MIN_RVOL`)
-- **VWAP ≤ 1.45×** (`ORB_VWAP_LIMIT`)
-- \+ universal safety floors
+- **VWAP ≤ 1.45×** (`ORB_VWAP_LIMIT` = shared `VWAP_LIMIT`)
+- \+ universal safety floors (incl. the **2M–100M float band**)
 
 ---
 
