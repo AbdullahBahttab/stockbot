@@ -4449,7 +4449,7 @@ def main():
     schedule.every(15).minutes.do(reset_stale_cooldowns)
     schedule.every().day.at("09:25").do(reset_daily)        # ET — clear yesterday's alerts before open
     schedule.every(20).minutes.do(check_alert_performance)   # resolve T1/T2/stop through the day
-    schedule.every(1).minutes.do(orb_scan)                   # ORB breakouts — first 90 min only
+    # schedule.every(1).minutes.do(orb_scan)                 # ORB DISABLED 2026-06-18 — 0 alerts all week even after loosening vol to 2.5x. Code kept; re-enable by uncommenting.
     schedule.every(10).minutes.do(gap_scan)                  # gap-up-on-news pullback setups
     schedule.every(15).minutes.do(ema_scan)                  # EMA100 breakout — ENABLED (swapped in for A/B)
     while True:
