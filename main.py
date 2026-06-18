@@ -699,6 +699,9 @@ MIN_PRICE       = 1.5     # unified floor for ALL strategies (user) — float + 
 MAX_PRICE       = 65.0
 MAX_CHANGE_PCT  = 40.0    # don't alert stocks already up more than this % — too extended, they fade
 MIN_FLOAT_M     = 2.0     # reject nano-floats below this (M shares) — pump-and-dump risk (ASBP 1.3M, SDOT 0.74M)
+MAX_FLOAT_M     = 100.0   # reject big floats above this (M shares) — too heavy for a momentum move; UNIVERSAL (A/B, ORB, GAP, EMA)
+VWAP_LIMIT      = 1.45    # max price/VWAP extension — above this we're chasing. SHARED by A/B + ORB (change in one place)
+VWAP_LIMIT_PARABOLIC = 1.25  # tighter VWAP cap for the daily-parabolic A/B case
 SCAN_EVERY_MIN  = 1      # scan every minute — faster reaction (was 2)
 ALERT_COOLDOWN  = 1800    # seconds before same stock can re-alert
 
@@ -720,7 +723,7 @@ MAX_CANDIDATES  = 40      # max stocks enriched per scan (screener can return ma
 ORB_RANGE_MIN   = 12      # opening range = high/low of the first 12 minutes (Balanced)
 ORB_WINDOW_END  = 11*60   # stop hunting breakouts after 11:00 ET (90 min post-open)
 ORB_MIN_RVOL    = 2.5     # breakout bar must have >= this x the opening-range avg volume (loosened 3.2→2.5 to fire more)
-ORB_VWAP_LIMIT  = 1.45    # breakout price must be <= this x VWAP (not over-extended)
+ORB_VWAP_LIMIT  = VWAP_LIMIT  # breakout price must be <= this x VWAP — shared constant (see VWAP_LIMIT above)
 orb_alerted     = set()   # symbols already ORB-alerted today (cleared in reset_daily)
 # ── Gap-Pullback (gap-up-on-news, then buy the pullback to support) ──
 GAP_MIN_PCT       = 15.0  # the prior 'gap' day must have run up >= this %
@@ -3488,6 +3491,8 @@ def passes_safety_floors(fv: dict, price: float, f: dict) -> tuple:
                        f"< ${f.get('min_dollar_vol', 0)/1e6:.1f}M — can't exit safely")
     if flt is not None and flt < MIN_FLOAT_M:
         return False, f"nano-float {flt:.1f}M < {MIN_FLOAT_M:.0f}M — pump-and-dump risk (ASBP/SDOT type)"
+    if flt is not None and flt > MAX_FLOAT_M:
+        return False, f"float {flt:.0f}M > {MAX_FLOAT_M:.0f}M — too heavy for a momentum move (now universal, was A/B-only)"
     chg = fv.get("change_pct")
     if chg is not None and chg > MAX_CHANGE_PCT:
         return False, f"already up {chg:.0f}% — too extended, parabolic crash risk (SLBT type)"
@@ -3531,7 +3536,7 @@ def passes_filters(stock: dict, fv: dict, f: dict) -> tuple:
     if mc and mc < 1:                     return False, f"nano-cap ${mc:.1f}M"
     vwap = fv.get("vwap")
     if vwap and vwap > 0:
-        vwap_limit = 1.25 if (fv.get("rsi_source") == "daily" and chg > 100) else 1.45
+        vwap_limit = VWAP_LIMIT_PARABOLIC if (fv.get("rsi_source") == "daily" and chg > 100) else VWAP_LIMIT
         if p > vwap * vwap_limit:         return False, f"price ${p:.2f} > {vwap_limit}x VWAP ${vwap:.2f} — over-extended, will fade"
     if rv and rv < 0.5 and chg > 50:      return False, f"dying volume RelVol={rv:.1f}x"
     if rv is not None and 0 < rv < 2.8:   return False, f"RelVol {rv:.1f}x < 2.8x — not enough volume"
