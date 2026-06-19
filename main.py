@@ -5781,6 +5781,27 @@ def api_performance():
         rows = [a for a in rows if str(a.get("grade", "")).upper() in wanted]
     return _api_jsonify({"count": len(rows), "alerts": rows})
 
+@server.route("/api/gainers")
+def api_gainers():
+    # Raw top-gainers list (pre-filter) so OpenClaw can hunt "price explosion" names.
+    if not API_TOKEN:
+        return _api_jsonify({"error": "API disabled — set API_TOKEN env var"}), 503
+    token = _api_request.args.get("token") or _api_request.headers.get("X-API-Token", "")
+    if token != API_TOKEN:
+        return _api_jsonify({"error": "unauthorized"}), 401
+    session = (_api_request.args.get("session") or "OPEN").upper()
+    if session not in URLS:
+        session = "OPEN"
+    try:
+        limit = max(1, min(int(_api_request.args.get("limit", "25")), 100))
+    except ValueError:
+        limit = 25
+    try:
+        rows = fetch_gainers(session)
+    except Exception as e:
+        return _api_jsonify({"error": str(e)}), 500
+    return _api_jsonify({"session": session, "count": len(rows[:limit]), "gainers": rows[:limit]})
+
 def _session_auth():
     """Trusted identity from the signed session cookie, or None if not logged in.
     Returns {chat_id, name, is_admin}. NEVER read auth from the client Store."""
