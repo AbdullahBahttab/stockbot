@@ -4305,11 +4305,10 @@ def build_gap_alert(sig: dict) -> str:
     D = "━━━━━━━━━━━━━━━━━━━━"
     # GAP is a short SWING / bounce play (hold hours toward the prior peak) — no scalp scale-out.
     return (
-        f"🎯 <b>{sym}</b>   ${price:.2f}   GAP pullback (bounce)\n"
+        f"🎯 <b>{sym}</b>   ${price:.2f}\n"
         f"Entry    ${entry_lo} – ${entry_hi}\n"
         f"Stop     ${stop}   -{stop_pct}%   (below support — exit if it breaks)\n"
         f"🎯 Target ${sig['peak']:.2f}   (+{sig['upside']}% — the prior peak)\n"
-        f"⏳ Bounce play — hold for the move back toward the peak (hours), not a quick scalp.\n"
         f"📊 pulled back to support ${sig['support']:.2f} after a news gap\n"
         f"{D}\n"
         f"💬 <code>/check {sym}</code> for full analysis"
@@ -4416,11 +4415,10 @@ def build_ema_alert(sig: dict) -> str:
     D = "━━━━━━━━━━━━━━━━━━━━"
     # EMA is a SWING setup (plays out over days) — no scalp scale-out here.
     return (
-        f"📈 <b>{sym}</b>   ${price:.2f}   EMA100 breakout (swing)\n"
+        f"📈 <b>{sym}</b>   ${price:.2f}\n"
         f"Entry    ${entry_lo} – ${entry_hi}\n"
         f"Stop     ${stop}   -{stop_pct}%   (just below the 100-EMA)\n"
         f"🎯 Target ${sig['ema200']:.2f}   (+{sig['upside']}% — the 200-EMA)\n"
-        f"⏳ Swing trade — give it DAYS to reach the 200-EMA, not minutes.\n"
         f"📊 broke 100-EMA ${sig['ema100']:.2f}\n"
         f"{D}\n"
         f"💬 <code>/check {sym}</code> for full analysis"
