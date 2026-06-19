@@ -5745,6 +5745,42 @@ def api_alerts():
         alerts = [a for a in alerts if str(a.get("grade", "")).upper() in wanted]
     return _api_jsonify({"count": len(alerts), "alerts": alerts})
 
+@server.route("/api/performance")
+def api_performance():
+    # Alerts WITH outcomes (win/loss/flat + % after), for the weekly A/B review.
+    if not API_TOKEN:
+        return _api_jsonify({"error": "API disabled — set API_TOKEN env var"}), 503
+    token = _api_request.args.get("token") or _api_request.headers.get("X-API-Token", "")
+    if token != API_TOKEN:
+        return _api_jsonify({"error": "unauthorized"}), 401
+    try:
+        hours = max(1, min(int(_api_request.args.get("hours", "168")), 720))
+    except ValueError:
+        hours = 168
+    conn = get_conn()
+    if not conn:
+        return _api_jsonify({"error": "db unavailable"}), 503
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT symbol, alert_price, grade, change_pct, rsi, session,
+                   alerted_at, outcome, pct_after_alert, close_price
+            FROM   alerts
+            WHERE  alerted_at >= datetime('now', ? || ' hours')
+            ORDER  BY alerted_at DESC
+        """, (f"-{hours}",))
+        cols = [c[0] for c in cur.description]
+        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+    except Exception as e:
+        return _api_jsonify({"error": str(e)}), 500
+    finally:
+        conn.close()
+    grade = _api_request.args.get("grade")
+    if grade:
+        wanted = {g.strip().upper() for g in grade.split(",")}
+        rows = [a for a in rows if str(a.get("grade", "")).upper() in wanted]
+    return _api_jsonify({"count": len(rows), "alerts": rows})
+
 def _session_auth():
     """Trusted identity from the signed session cookie, or None if not logged in.
     Returns {chat_id, name, is_admin}. NEVER read auth from the client Store."""
