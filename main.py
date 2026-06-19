@@ -5789,18 +5789,18 @@ def api_gainers():
     token = _api_request.args.get("token") or _api_request.headers.get("X-API-Token", "")
     if token != API_TOKEN:
         return _api_jsonify({"error": "unauthorized"}), 401
-    session = (_api_request.args.get("session") or "OPEN").upper()
-    if session not in URLS:
-        session = "OPEN"
     try:
         limit = max(1, min(int(_api_request.args.get("limit", "25")), 100))
     except ValueError:
         limit = 25
+    session = get_session()   # None on weekend / market holiday / outside 4am-8pm ET
+    if session is None:
+        return _api_jsonify({"market": "CLOSED", "session": None, "count": 0, "gainers": []})
     try:
         rows = fetch_gainers(session)
     except Exception as e:
         return _api_jsonify({"error": str(e)}), 500
-    return _api_jsonify({"session": session, "count": len(rows[:limit]), "gainers": rows[:limit]})
+    return _api_jsonify({"market": "OPEN", "session": session, "count": len(rows[:limit]), "gainers": rows[:limit]})
 
 def _session_auth():
     """Trusted identity from the signed session cookie, or None if not logged in.
