@@ -4488,8 +4488,8 @@ def main():
         f"Send /help for all commands"
     )
 
-    # run_scan()  # A/B DISABLED — worst strategy (8-16% win, fades, barely fires). /scan still runs it manually.
-    # schedule.every(SCAN_EVERY_MIN).minutes.do(run_scan)
+    run_scan()  # A/B RE-ENABLED 2026-06-19 — fires wide; OpenClaw analysis layer filters the fades before entry.
+    schedule.every(SCAN_EVERY_MIN).minutes.do(run_scan)
     schedule.every(2).minutes.do(check_portfolio)            # keep stop-loss/exit monitoring alive (it used to run inside run_scan)
     schedule.every(15).minutes.do(reset_stale_cooldowns)
     schedule.every().day.at("09:25").do(reset_daily)        # ET — clear yesterday's alerts before open
@@ -5718,6 +5718,32 @@ server.secret_key = os.environ.get("SECRET_KEY") or _secrets.token_hex(32)
 if not os.environ.get("SECRET_KEY"):
     log.warning("[dashboard] SECRET_KEY env var not set — using a random key; "
                 "dashboard logins reset on every restart. Set SECRET_KEY to persist sessions.")
+
+# ── Read-only JSON feed for an external assistant (OpenClaw) ───────────────
+# Lets OpenClaw on the home PC PULL recent alerts (it can reach Railway, but
+# Railway can't reach the PC), analyze setup/news, and message a verdict.
+# Token-gated via the API_TOKEN env var; returns nothing if the token is unset.
+from flask import request as _api_request, jsonify as _api_jsonify
+
+API_TOKEN = os.environ.get("API_TOKEN", "")
+
+@server.route("/api/alerts")
+def api_alerts():
+    if not API_TOKEN:
+        return _api_jsonify({"error": "API disabled — set API_TOKEN env var"}), 503
+    token = _api_request.args.get("token") or _api_request.headers.get("X-API-Token", "")
+    if token != API_TOKEN:
+        return _api_jsonify({"error": "unauthorized"}), 401
+    try:
+        hours = max(1, min(int(_api_request.args.get("hours", "12")), 168))
+    except ValueError:
+        hours = 12
+    alerts = db_get_recent_alerts(hours=hours)
+    grade = _api_request.args.get("grade")
+    if grade:
+        wanted = {g.strip().upper() for g in grade.split(",")}
+        alerts = [a for a in alerts if str(a.get("grade", "")).upper() in wanted]
+    return _api_jsonify({"count": len(alerts), "alerts": alerts})
 
 def _session_auth():
     """Trusted identity from the signed session cookie, or None if not logged in.
