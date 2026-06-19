@@ -709,7 +709,8 @@ ALERT_COOLDOWN  = 1800    # seconds before same stock can re-alert
 ALERT_T1_PCT    = 0.05    # first target  → PASS (+5% within the window)
 ALERT_T2_PCT    = 0.10    # second target → PASS (+10%, bigger)
 ALERT_STOP_PCT  = 0.07    # stop loss     → FAIL
-ALERT_OPEN_MIN  = 30      # minutes to hit +5%; no target hit by then → FAIL
+ALERT_OPEN_MIN  = 30      # SCALP window (A/B, ORB): minutes to hit +5%; no target by then → FAIL
+GAP_OPEN_MIN    = 360     # GAP is a bounce held for HOURS — give it the session (~6h), not 30 min. EMA = excluded (judged over days).
 MOMENTUM_ALERTS = False   # separate "high-risk momentum" channel for big runners the
                           # strict filter rejects (unverified pumps). OFF by default —
                           # admin can enable live with /momentum on.
@@ -1362,9 +1363,25 @@ def _parse_qty(s) -> int | None:
     except (ValueError, TypeError):
         return None
 
+# US stock-market holidays (NYSE/Nasdaq full closures) — the bot only knew
+# about weekends before, so it scanned & alerted on stale data on holidays like
+# Juneteenth. Update this set each year (these are the actual 2026 & 2027 dates).
+MARKET_HOLIDAYS = {
+    # 2026
+    "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25",
+    "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25",
+    # 2027
+    "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31",
+    "2027-06-18", "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24",
+}
+
+def is_market_holiday(dt=None) -> bool:
+    et = dt or datetime.now(EASTERN)
+    return et.strftime("%Y-%m-%d") in MARKET_HOLIDAYS
+
 def get_session() -> str | None:
     now = datetime.now(EASTERN)
-    if now.weekday() >= 5:
+    if now.weekday() >= 5 or is_market_holiday(now):   # weekend OR holiday → market closed
         return None
     m = now.hour * 60 + now.minute
     if   4*60    <= m < 9*60+30: return "PRE"
@@ -2191,21 +2208,27 @@ def fetch_intraday_bars(symbol: str, count: int = 240) -> list:
             return []
 
 
-def simulate_trade_outcome(alert_price: float, alerted_ts: float, bars: list):
+def simulate_trade_outcome(alert_price: float, alerted_ts: float, bars: list,
+                           window_min: float = None):
     """
     Replay the trade after the alert, first-touch:
-      T2 (+20%) or T1 (+10%) reached  → ("PASS", pct, label)  WIN
+      T2 (+10%) or T1 (+5%) reached   → ("PASS", pct, label)  WIN
       stop (-7%) reached first         → ("FAIL", -7, label)  LOSS
       neither yet                      → ("OPEN", None, ...)
     Same-bar ties resolve target-first — momentum alerts usually push up
     before pulling back, and once T1 prints you'd have taken profit.
+    `window_min` = how long the trade has to work (defaults to the scalp
+    ALERT_OPEN_MIN; GAP passes its longer GAP_OPEN_MIN — it's a bounce held
+    for hours, not a 30-min scalp).
     """
     if not alert_price or alert_price <= 0:
         return None
+    if window_min is None:
+        window_min = ALERT_OPEN_MIN
     t1   = alert_price * (1 + ALERT_T1_PCT)
     t2   = alert_price * (1 + ALERT_T2_PCT)
     stop = alert_price * (1 - ALERT_STOP_PCT)
-    window_end = alerted_ts + ALERT_OPEN_MIN * 60   # only count moves within the window
+    window_end = alerted_ts + window_min * 60   # only count moves within the window
     reached_t1 = False
     for ts, hi, lo, _close in bars:
         if ts < alerted_ts:
@@ -3046,6 +3069,30 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
             if os.path.exists(fp):
                 send_document(uid, fp)
         send_to(uid, "✅ Backup sent — save these files." if ok else "❌ Backup failed — check logs.")
+
+    elif cmd.startswith("/cleartrades"):
+        if not is_admin(uid):
+            send_to(uid, "❌ Admin only command.")
+            return
+        parts = text.strip().split()
+        confirmed = len(parts) >= 2 and parts[1].lower() == "confirm"
+        try:
+            with sqlite3.connect(DB_PATH, timeout=10) as c:
+                n = c.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+                if not confirmed:
+                    send_to(uid,
+                        f"⚠️ <b>Clear trade history?</b>\n"
+                        f"This deletes <b>{n}</b> closed trades (the old June 5–12 records).\n"
+                        f"Alerts and open positions are NOT touched.\n\n"
+                        f"1️⃣ Run <code>/backup</code> first (saves the DB to you).\n"
+                        f"2️⃣ Then send <code>/cleartrades confirm</code> to wipe.")
+                    return
+                c.execute("DELETE FROM trades")
+            send_to(uid, f"✅ Cleared {n} old trades. Dashboard P&L / win-rate start clean now.")
+            log.info(f"[cleartrades] admin {uid} deleted {n} trades")
+        except Exception as e:
+            send_to(uid, f"❌ Clear failed: {e}")
+            log.error(f"[cleartrades] {e}")
 
     elif cmd.startswith("/inflow"):
         if not is_admin(uid):
@@ -4008,8 +4055,10 @@ def check_alert_performance():
         except Exception:
             continue
 
+        # GAP is a bounce held for hours → give it the session; A/B & ORB are scalps (30 min).
+        win_min = GAP_OPEN_MIN if grade == "GAP" else ALERT_OPEN_MIN
         bars = fetch_intraday_bars(sym)
-        sim  = simulate_trade_outcome(alert_price, alerted_ts, bars) if bars else None
+        sim  = simulate_trade_outcome(alert_price, alerted_ts, bars, win_min) if bars else None
         if not sim:
             continue
         outcome, pct, label = sim
@@ -4020,9 +4069,9 @@ def check_alert_performance():
             resolved += 1
             log.info(f"[Performance] {sym} [{grade}] → {outcome} ({label})")
         else:
-            # No target hit yet — give it ALERT_OPEN_MIN to work, then close FLAT.
+            # No target hit yet — give it its window (win_min) to work, then close FLAT.
             age_min = (time.time() - alerted_ts) / 60.0
-            if age_min >= ALERT_OPEN_MIN:
+            if age_min >= win_min:
                 last  = bars[-1][3] if bars else None
                 pct_c = round((last - alert_price) / alert_price * 100, 2) if last else 0.0
                 # No +5% within the 30-min window → the alert FAILED (user's definition).
@@ -4148,7 +4197,7 @@ def orb_scan():
     never break the main scanner."""
     try:
         et = datetime.now(EASTERN)
-        if et.weekday() >= 5:
+        if et.weekday() >= 5 or is_market_holiday(et):   # weekend OR holiday
             return
         mins = et.hour * 60 + et.minute
         if not (9*60 + 30 + ORB_RANGE_MIN <= mins <= ORB_WINDOW_END):
@@ -4734,6 +4783,7 @@ def market_status():
         et = datetime.now(timezone("US/Eastern"))
         m, wd = et.hour * 60 + et.minute, et.weekday()
         if wd >= 5:                return "WEEKEND",     MUTED
+        if is_market_holiday(et):  return "CLOSED",      MUTED   # market holiday (Juneteenth, etc.)
         if 9*60+30 <= m < 16*60:   return "MARKET OPEN", GREEN
         if 4*60    <= m < 9*60+30: return "PRE-MARKET",  YELLOW
         if 16*60   <= m <= 20*60:  return "AFTER-HOURS", CYAN
