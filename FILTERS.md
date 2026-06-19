@@ -112,10 +112,17 @@ and watch for a volume-backed break above the 100 toward the 200.
 
 ## 🎯 Alert outcome tracking (dashboard win-rate)
 
-How each alert is scored automatically (fits the intraday strategies — A/B, ORB, GAP):
-- **PASS** = hit **+5%** (T1) or **+10%** (T2) within **30 minutes** (`ALERT_T1_PCT` / `ALERT_T2_PCT` / `ALERT_OPEN_MIN`)
-- **FAIL** = hit the **−7%** stop, or no +5% within 30 minutes (`ALERT_STOP_PCT`)
-- **EMA is excluded** — it's a multi-day swing, so the 30-min metric can't score it; judge it manually over days.
+Each alert is scored on a window that matches the strategy's hold time:
+- **PASS** = hit **+5%** (T1) or **+10%** (T2) within the window (`ALERT_T1_PCT` / `ALERT_T2_PCT`)
+- **FAIL** = hit the **−7%** stop (`ALERT_STOP_PCT`), or no +5% by the window's end
+- **Window is per-strategy:**
+  - **A/B & ORB (scalps):** **30 minutes** (`ALERT_OPEN_MIN`)
+  - **GAP (bounce held for hours):** **~6 hours / the session** (`GAP_OPEN_MIN=360`) — it's a bounce toward the prior peak, so the 30-min scalp clock was wrong and falsely failed it.
+- **EMA is excluded** — it's a multi-day swing, so an intraday metric can't score it; judge it manually over days.
+
+> **Market holidays:** the bot now skips scanning/alerting on US market holidays
+> (`MARKET_HOLIDAYS`, e.g. Juneteenth) — before, it only knew about weekends and
+> would alert on stale data. Update the holiday set each year.
 
 > The scale-out plan below applies to the **scalp** strategies (A/B, ORB).
 > **GAP** uses bounce exits: stop below support, target the prior peak, held hours.
