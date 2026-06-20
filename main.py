@@ -714,6 +714,10 @@ GAP_OPEN_MIN    = 360     # GAP is a bounce held for HOURS — give it the sessi
 MOMENTUM_ALERTS = False   # separate "high-risk momentum" channel for big runners the
                           # strict filter rejects (unverified pumps). OFF by default —
                           # admin can enable live with /momentum on.
+AB_BROADCAST    = False   # A/B grade alerts: when False, scan + LOG them silently (so the
+                          # /api/alerts feed + OpenClaw still see them) but DON'T broadcast to
+                          # Telegram. OpenClaw analyzes A/B and DMs only the good ones. Set True
+                          # to restore raw A/B alerts to all bot users. (GAP/EMA unaffected.)
 INFLOW_REQUIRED = True    # when ON, only alert stocks with confirmed inflow (OBV↑) +
                           # volume surge, caught earlier (lower change bar) — strict/
                           # high-quality. Default ON per user. /inflow off = simple/more.
@@ -3838,7 +3842,10 @@ def run_scan(requester_id=None):
             why   = (f"2nd-wave RelVol {rv_now:.0f}x" if second_wave and not obv_fresh
                      else f"OBV↑ + MFI={mfi_s}")
             log.info(f"  Allow {sym} re-alert — {why} → fresh new leg vs prev ${prev['price']:.2f}")
-        broadcast(build_alert_simple(stock, fv, session))
+        if AB_BROADCAST:
+            broadcast(build_alert_simple(stock, fv, session))
+        else:
+            log.info(f"  A/B broadcast suppressed (OpenClaw-only) → {sym}")
         with _lock:
             alerted[sym] = time.time()
             watchlist_log.append({
@@ -3861,9 +3868,9 @@ def run_scan(requester_id=None):
         sent += 1
         log.info(f"  Broadcast → {sym}  ${stock['price']:.2f}  ({stock['change']:+.1f}%)  Grade={grade}")
 
-        # Sector follow-through — scan peers in background
+        # Sector follow-through — scan peers in background (A/B-driven; skip when A/B is OpenClaw-only)
         peers = SECTOR_PEERS.get(sym, [])
-        if peers:
+        if peers and AB_BROADCAST:
             def _check_peers(triggered=sym, peer_list=peers, sess=session, fil=f):
                 time.sleep(2)
                 for peer in peer_list:
