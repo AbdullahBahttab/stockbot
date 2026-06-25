@@ -5809,6 +5809,45 @@ def api_gainers():
         return _api_jsonify({"error": str(e)}), 500
     return _api_jsonify({"market": "OPEN", "session": session, "count": len(rows[:limit]), "gainers": rows[:limit]})
 
+@server.route("/api/notify", methods=["POST"])
+def api_notify():
+    # OpenClaw (home PC) PUSHES a verdict here; the bot relays it into its OWN Telegram.
+    # Railway can't reach the PC and Telegram blocks bot-to-bot, so OpenClaw POSTs the text
+    # and the bot — which holds BOT_TOKEN — forwards it to the admin. Token-gated like the rest.
+    if not API_TOKEN:
+        return _api_jsonify({"error": "API disabled — set API_TOKEN env var"}), 503
+    token = _api_request.args.get("token") or _api_request.headers.get("X-API-Token", "")
+    if token != API_TOKEN:
+        return _api_jsonify({"error": "unauthorized"}), 401
+    body = _api_request.get_json(silent=True) or {}
+    text = (body.get("message") or body.get("text") or "").strip()
+    if not text:
+        # Build the message from structured verdict fields if no preformatted text was sent.
+        sym     = str(body.get("symbol", "")).upper().strip()
+        verdict = str(body.get("verdict", "")).strip()
+        if not (sym and verdict):
+            return _api_jsonify({"error": "need 'message', or both 'symbol' and 'verdict'"}), 400
+        grade    = str(body.get("grade", "")).strip()
+        catalyst = str(body.get("catalyst", "")).strip()
+        reason   = str(body.get("reason", "")).strip()
+        entry, stop  = body.get("entry"), body.get("stop")
+        target, spct = body.get("target"), body.get("stop_pct")
+        lines = [f"{sym} {verdict}" + (f" ({grade})" if grade else "")]
+        if catalyst: lines.append(f"🗞️ {catalyst}")
+        if reason:   lines.append(reason)
+        if entry not in (None, ""):
+            lvl = f"Entry {entry}"
+            if stop not in (None, ""):
+                lvl += f" · Stop {stop}" + (f" (-{spct}%)" if spct not in (None, "") else "")
+            if target not in (None, ""):
+                lvl += f" · Tgt {target}"
+            lines.append(lvl)
+        text = "\n".join(lines)
+    import html as _html
+    target_uid = str(body.get("to") or ADMIN_ID)
+    ok = send_to(target_uid, "🤖 <b>OpenClaw</b>\n" + _html.escape(text))
+    return _api_jsonify({"ok": bool(ok), "sent_to": target_uid})
+
 def _session_auth():
     """Trusted identity from the signed session cookie, or None if not logged in.
     Returns {chat_id, name, is_admin}. NEVER read auth from the client Store."""
