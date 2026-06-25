@@ -5851,7 +5851,7 @@ def api_notify():
         text = "\n".join(lines)
     import html as _html
     target_uid = str(body.get("to") or ADMIN_ID)
-    ok = send_to(target_uid, "🤖 <b>OpenClaw</b>\n" + _html.escape(text))
+    ok = send_to(target_uid, _html.escape(text))   # relay as-is (no source label), escaped for HTML parse_mode
     return _api_jsonify({"ok": bool(ok), "sent_to": target_uid})
 
 def _session_auth():
