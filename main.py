@@ -735,11 +735,11 @@ ORB_MIN_RVOL    = 2.5     # breakout bar must have >= this x the opening-range a
 ORB_VWAP_LIMIT  = VWAP_LIMIT  # breakout price must be <= this x VWAP — shared constant (see VWAP_LIMIT above)
 orb_alerted     = set()   # symbols already ORB-alerted today (cleared in reset_daily)
 # ── Gap-Pullback (gap-up-on-news, then buy the pullback to support) ──
-GAP_MIN_PCT       = 15.0  # the prior 'gap' day must have run up >= this %
-GAP_MAX_PCT       = 45.0  # ...but <= this % (above that it's blown off, won't bounce clean)
-GAP_LOOKBACK_DAYS = 6     # look for the gap day within the last N trading days
-GAP_ENTRY_ZONE    = 0.10  # entry when price is within this % above support
-GAP_MIN_UPSIDE    = 0.15  # target (prior peak) must be >= this % above current price
+GAP_MIN_PCT       = 12.0  # the prior 'gap' day must have run up >= this % (loosened 15→12 for more setups, 2026-06-26)
+GAP_MAX_PCT       = 50.0  # ...but <= this % (loosened 45→50; catalyst+safety gates still filter quality)
+GAP_LOOKBACK_DAYS = 10    # look for the gap day within the last N trading days (6→10 = more chances)
+GAP_ENTRY_ZONE    = 0.15  # entry when price is within this % above support (0.10→0.15 = wider pullback zone)
+GAP_MIN_UPSIDE    = 0.10  # target (prior peak) must be >= this % above current price (0.15→0.10 = more pass)
 gap_alerted       = set() # symbols already gap-alerted today (cleared in reset_daily)
 # ── EMA breakout (cross above EMA100 on volume+news, target EMA200) ──
 EMA_FAST          = 100   # break above this EMA = entry signal
@@ -4262,6 +4262,22 @@ def fetch_daily_bars(tid: str, count: int = 12) -> list:
     return _fetch_ohlcv(tid, "d1", count)
 
 
+def spy_market_alert():
+    """Standalone market-context safety alert (it used to live inside the now-disabled A/B run_scan).
+    Warns at most once per day when SPY is crashing so the owner avoids new entries."""
+    try:
+        if get_session() is None:
+            return
+        spy = fetch_spy_change()
+        _market_context["spy_chg"] = spy
+        today = datetime.now(EASTERN).date().isoformat()
+        if spy <= -3.0 and _market_context.get("spy_alert_day") != today:
+            broadcast(f"⚠️ <b>Market Alert</b>\nSPY {spy:+.1f}% — market is crashing. Avoid new entries.")
+            _market_context["spy_alert_day"] = today
+    except Exception as e:
+        log.error(f"[SPY alert] {e}")
+
+
 def detect_gap_pullback(symbol: str):
     """Gap-up-on-news pullback setup. Cheap daily-bar geometry check first; only
     confirms the (expensive) news catalyst if the geometry matches."""
@@ -4395,8 +4411,8 @@ def detect_ema_breakout(symbol: str):
     price, prev = closes[-1], closes[-2]
     if not (MIN_PRICE <= price <= MAX_PRICE):
         return None
-    if not (prev <= e_fast < price):         # crossed above the 100-EMA today
-        return None
+    if not (price > e_fast and price <= e_fast * 1.08 and min(closes[-4:-1]) <= e_fast):
+        return None                          # just RECLAIMED the 100-EMA within ~3 days, still fresh (<=8% above) — was: crossed exactly today (too rare)
     if e_slow <= price:                      # no upside room to the 200-EMA target
         return None
     # geometry matches — confirm volume + catalyst (expensive)
@@ -4404,7 +4420,7 @@ def detect_ema_breakout(symbol: str):
     if not fv:
         return None
     rv = fv.get("rel_vol")
-    if not (rv and rv >= 3):                 # high volume required
+    if not (rv and rv >= 2):                 # elevated volume required (loosened 3→2 for more EMA setups, 2026-06-26)
         return None
     if score_catalyst(fv.get("news", ""))[0] < 1:
         return None
@@ -4515,6 +4531,7 @@ def main():
     # schedule.every(1).minutes.do(orb_scan)                 # ORB DISABLED 2026-06-18 — 0 alerts all week even after loosening vol to 2.5x. Code kept; re-enable by uncommenting.
     schedule.every(10).minutes.do(gap_scan)                  # gap-up-on-news pullback setups
     schedule.every(15).minutes.do(ema_scan)                  # EMA100 breakout — ENABLED (swapped in for A/B)
+    schedule.every(15).minutes.do(spy_market_alert)          # market-crash safety alert (re-added after A/B run_scan was disabled)
     while True:
         schedule.run_pending()
         time.sleep(5)    # scheduler tick — tighter so scans fire close to their scheduled minute
