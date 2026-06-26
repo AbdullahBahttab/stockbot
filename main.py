@@ -4314,6 +4314,9 @@ def detect_gap_pullback(symbol: str):
     fv = fetch_stock_data(symbol)
     if not fv or score_catalyst(fv.get("news", ""))[0] < 1:
         return None
+    rv = fv.get("rel_vol")
+    if not (rv and rv >= 2):                 # REAL volume behind the bounce (matches EMA) — filters thin/penny GAPs that fade (added 2026-06-26)
+        return None
     p = fv.get("price") or price
     # Safety floors (liquidity + nano-float) — shared with A/B and ORB.
     _f = FILTERS.get(get_session() or "OPEN", FILTERS["OPEN"])
