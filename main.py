@@ -4502,7 +4502,12 @@ def main():
     )
 
     run_scan()  # A/B RE-ENABLED 2026-06-19 — fires wide; OpenClaw analysis layer filters the fades before entry.
-    schedule.every(SCAN_EVERY_MIN).minutes.do(run_scan)
+    # A/B momentum scan DISABLED 2026-06-26: 30d data showed A/B averages -5% to -11% with a ~12%
+    # pass-rate at EVERY price → zero tradeable entries, and it burned the Webull screener API for
+    # nothing. GAP/EMA (their own Webull pull) + the gainer scanner remain. run_scan() is kept defined
+    # so a manual /scan still works; only the auto-schedule is off. (It also carried the SPY-crash
+    # market-alert broadcast — that goes quiet; re-add as a separate job if wanted.) Re-enable: uncomment.
+    # schedule.every(SCAN_EVERY_MIN).minutes.do(run_scan)
     schedule.every(2).minutes.do(check_portfolio)            # keep stop-loss/exit monitoring alive (it used to run inside run_scan)
     schedule.every(15).minutes.do(reset_stale_cooldowns)
     schedule.every().day.at("09:25").do(reset_daily)        # ET — clear yesterday's alerts before open
