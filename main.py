@@ -697,6 +697,8 @@ LOG_FILE       = os.path.join(BASE_DIR, "scanner.log")
 
 MIN_PRICE       = 1.5     # unified floor for ALL strategies (user) — float + liquidity floors do the heavy lifting now
 MAX_PRICE       = 65.0
+GAPEMA_MIN_PRICE = 4.0    # HIGHER floor for GAP/EMA only (quality, 2026-06-27): sub-$4 setups whip & fade —
+                          # every recent GAP/EMA loser (MBRX 3.45, MIMI 3.46, QUCY 1.75, NEOV 2.20) was <$4
 MAX_CHANGE_PCT  = 40.0    # don't alert stocks already up more than this % — too extended, they fade
 MIN_FLOAT_M     = 2.0     # reject nano-floats below this (M shares) — pump-and-dump risk (ASBP 1.3M, SDOT 0.74M)
 MAX_FLOAT_M     = 100.0   # reject big floats above this (M shares) — too heavy for a momentum move; UNIVERSAL (A/B, ORB, GAP, EMA)
@@ -737,7 +739,7 @@ orb_alerted     = set()   # symbols already ORB-alerted today (cleared in reset_
 # ── Gap-Pullback (gap-up-on-news, then buy the pullback to support) ──
 GAP_MIN_PCT       = 12.0  # the prior 'gap' day must have run up >= this % (loosened 15→12 for more setups, 2026-06-26)
 GAP_MAX_PCT       = 50.0  # ...but <= this % (loosened 45→50; catalyst+safety gates still filter quality)
-GAP_LOOKBACK_DAYS = 10    # look for the gap day within the last N trading days (6→10 = more chances)
+GAP_LOOKBACK_DAYS = 6     # look for the gap day within the last N trading days (10→6 = FRESHER gaps follow through better, 2026-06-27)
 GAP_ENTRY_ZONE    = 0.15  # entry when price is within this % above support (0.10→0.15 = wider pullback zone)
 GAP_MIN_UPSIDE    = 0.10  # target (prior peak) must be >= this % above current price (0.15→0.10 = more pass)
 gap_alerted       = set() # symbols already gap-alerted today (cleared in reset_daily)
@@ -4288,7 +4290,7 @@ def detect_gap_pullback(symbol: str):
     if len(bars) < 3:
         return None
     price = bars[-1][2]                      # today's current/close
-    if not (MIN_PRICE <= price <= MAX_PRICE):
+    if not (GAPEMA_MIN_PRICE <= price <= MAX_PRICE):
         return None
     # find the 'gap candle' — biggest run-up day among the prior days (exclude today)
     recent = bars[:-1][-GAP_LOOKBACK_DAYS:]
@@ -4315,7 +4317,7 @@ def detect_gap_pullback(symbol: str):
     if not fv or score_catalyst(fv.get("news", ""))[0] < 1:
         return None
     rv = fv.get("rel_vol")
-    if not (rv and rv >= 2):                 # REAL volume behind the bounce (matches EMA) — filters thin/penny GAPs that fade (added 2026-06-26)
+    if not (rv and rv >= 2.5):               # stronger volume behind the bounce (2→2.5 quality, 2026-06-27) — thin GAPs fade
         return None
     p = fv.get("price") or price
     # Safety floors (liquidity + nano-float) — shared with A/B and ORB.
@@ -4412,7 +4414,7 @@ def detect_ema_breakout(symbol: str):
         return None
     e_fast, e_slow = ema_f[-1], ema_s[-1]
     price, prev = closes[-1], closes[-2]
-    if not (MIN_PRICE <= price <= MAX_PRICE):
+    if not (GAPEMA_MIN_PRICE <= price <= MAX_PRICE):
         return None
     if not (price > e_fast and price <= e_fast * 1.08 and min(closes[-4:-1]) <= e_fast):
         return None                          # just RECLAIMED the 100-EMA within ~3 days, still fresh (<=8% above) — was: crossed exactly today (too rare)
