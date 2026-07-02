@@ -18,7 +18,7 @@ stock_scanner.py / dashboard.py were merged here and moved to archive/.
  MODULE MAP  (search the banner text to jump to a section)
 ═══════════════════════════════════════════════════════════════════════
    CONFIG ............. settings, FILTERS, strategy constants
-   DATABASE ........... SQLite layer (users, portfolio, trades, alerts, scan_log)
+   DATABASE ........... SQLite layer (users, portfolio, trades, alerts, scan_log, paper_trades)
    DATA FETCHING ...... Webull (price/volume/candles/news) + Yahoo/Finviz fallback
    SCORING & GRADING .. RSI/MFI/OBV/EMA/VWAP/ignition + compute_grade
    ALERT MESSAGE ...... alert builders + scale_out_plan (shared style)
@@ -74,6 +74,17 @@ def setup_db():
     if not conn:
         return
     try:
+        # WAL mode: the scanner thread writes while the dashboard thread reads
+        # concurrently. In the default rollback-journal mode a writer blocks all
+        # readers (and vice versa) for the duration of a transaction; WAL lets
+        # readers proceed against the last-committed snapshot while a write is in
+        # flight, so the dashboard never has to wait on a scan. This setting is
+        # persisted in the database FILE itself (not the connection/process), so
+        # it only needs to be set once — but it's idempotent and cheap, so we set
+        # it on every startup to be safe (e.g. a fresh DB_PATH). The `timeout=10`
+        # busy-timeout in get_conn() is unrelated and stays as the backstop for
+        # the rare cases WAL still hits a lock (e.g. a concurrent checkpoint).
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS users (
                 chat_id     INTEGER PRIMARY KEY,
@@ -147,6 +158,27 @@ def setup_db():
                 session     TEXT,
                 scanned_at  DATETIME DEFAULT (datetime('now'))
             );
+
+            -- Paper trades synced in from the owner's OpenClaw agent (home PC),
+            -- which paper-trades via Alpaca and previously only kept a local JSON
+            -- file the bot never saw. Populated by POST /api/trades/sync.
+            CREATE TABLE IF NOT EXISTS paper_trades (
+                id          INTEGER  PRIMARY KEY AUTOINCREMENT,
+                symbol      TEXT,
+                grade       TEXT,
+                qty         REAL,
+                entry       REAL,
+                stop        REAL,
+                target      REAL,
+                status      TEXT,
+                exit_price  REAL,
+                pnl         REAL,
+                pnl_pct     REAL,
+                opened_at   TEXT,
+                closed_at   TEXT,
+                note        TEXT,
+                synced_at   DATETIME DEFAULT (datetime('now'))
+            );
         """)
         conn.commit()
     except Exception as e:
@@ -185,6 +217,15 @@ def migrate_db():
                     conn.execute("UPDATE users SET accepted=1")
             except Exception:
                 pass   # column already exists
+        # paper_trades identifies a trade by (symbol, opened_at) — /api/trades/sync
+        # upserts on that pair. Guard it with a UNIQUE index so a race between two
+        # syncs (or a retried POST) can never leave duplicate rows for the same trade.
+        try:
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_paper_trades_symbol_opened "
+                "ON paper_trades(symbol, opened_at)")
+        except Exception:
+            pass   # table not created yet on a brand-new DB path; setup_db() runs first anyway
         conn.commit()
     except Exception as e:
         log.error(f"[DB] migrate: {e}")
@@ -606,6 +647,108 @@ def db_get_trades(chat_id: str = None, days: int = 30) -> list:
         return [dict(zip(cols, row)) for row in cur.fetchall()]
     except Exception as e:
         log.error(f"[DB] get_trades: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+# ─── Paper trades (synced from the owner's OpenClaw agent) ────────────────────
+# OpenClaw paper-trades via Alpaca on the home PC and used to keep records only
+# in a local JSON file the bot never saw. POST /api/trades/sync pushes them here
+# so /pnl and the dashboard can see them too. A trade is identified by the pair
+# (symbol, opened_at) — see the UNIQUE index added in migrate_db().
+
+def db_sync_paper_trades(trades: list) -> tuple[int, int]:
+    """Upsert a batch of paper trades. Returns (inserted, updated). Rows that
+    fail validation are skipped (not counted, not raised) — a bad row from the
+    remote agent shouldn't take down the whole sync."""
+    conn = get_conn()
+    if not conn:
+        return (0, 0)
+    inserted = updated = 0
+    try:
+        for t in trades:
+            try:
+                symbol = str(t.get("symbol", "")).upper().strip()
+                opened_at = str(t.get("opened_at", "")).strip()
+                if not symbol or not opened_at:
+                    continue   # (symbol, opened_at) is the identity key — can't upsert without both
+
+                def _f(v):
+                    try: return float(v) if v is not None and v != "" else None
+                    except (TypeError, ValueError): return None
+
+                grade  = str(t.get("grade", "") or "").strip()
+                qty    = _f(t.get("qty"))
+                entry  = _f(t.get("entry"))
+                stop   = _f(t.get("stop"))
+                target = _f(t.get("target"))
+                status = str(t.get("status", "") or "").strip()
+                exitp  = _f(t.get("exit"))
+                pnl    = _f(t.get("pnl"))
+                pnl_pct = _f(t.get("pnl_pct"))
+                closed_at = str(t.get("closed_at", "") or "").strip() or None
+                note   = str(t.get("note", "") or "").strip() or None
+
+                cur = conn.execute(
+                    "SELECT id FROM paper_trades WHERE symbol=? AND opened_at=?",
+                    (symbol, opened_at))
+                row = cur.fetchone()
+                if row:
+                    conn.execute("""
+                        UPDATE paper_trades
+                        SET status=?, exit_price=?, pnl=?, pnl_pct=?, closed_at=?,
+                            stop=?, target=?, note=?, synced_at=datetime('now')
+                        WHERE id=?
+                    """, (status, exitp, pnl, pnl_pct, closed_at, stop, target, note, row["id"]))
+                    updated += 1
+                else:
+                    conn.execute("""
+                        INSERT INTO paper_trades
+                            (symbol, grade, qty, entry, stop, target, status,
+                             exit_price, pnl, pnl_pct, opened_at, closed_at, note)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (symbol, grade, qty, entry, stop, target, status,
+                          exitp, pnl, pnl_pct, opened_at, closed_at, note))
+                    inserted += 1
+            except Exception as e:
+                log.warning(f"[DB] sync_paper_trades: skipped malformed row: {e}")
+                continue
+        conn.commit()
+    except Exception as e:
+        log.error(f"[DB] sync_paper_trades: {e}")
+    finally:
+        conn.close()
+    return (inserted, updated)
+
+
+def db_get_paper_trades(status: str = None, grades: list = None, days: int = 30) -> list:
+    conn = get_conn()
+    if not conn:
+        return []
+    try:
+        # (named `sql`, not `q` — the dashboard section below defines a global
+        # `q()` query helper and re-using the name here would be confusing even
+        # though the scopes don't actually collide)
+        sql = """
+            SELECT id, symbol, grade, qty, entry, stop, target, status,
+                   exit_price, pnl, pnl_pct, opened_at, closed_at, note, synced_at
+            FROM   paper_trades
+            WHERE  opened_at >= datetime('now', ? || ' days')
+        """
+        params: list = [f"-{days}"]
+        if status:
+            sql += " AND status LIKE ?"
+            params.append(f"%{status}%")
+        if grades:
+            sql += f" AND UPPER(grade) IN ({','.join('?' * len(grades))})"
+            params.extend(g.upper() for g in grades)
+        sql += " ORDER BY opened_at DESC"
+        cur = conn.execute(sql, params)
+        cols = [c[0] for c in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+    except Exception as e:
+        log.error(f"[DB] get_paper_trades: {e}")
         return []
     finally:
         conn.close()
@@ -1044,7 +1187,7 @@ def test_claude() -> bool:
 # ═══════════════════════════════════════════════════════════════
 #  SHARED STATE
 # ═══════════════════════════════════════════════════════════════
-_lock           = threading.Lock()
+_lock           = threading.RLock()   # re-entrant: /status holds it while calling get_active_users(), which locks too
 alerted         = {}               # symbol → unix timestamp
 momentum_alerted = {}              # symbol → unix timestamp (high-risk channel cooldown)
 watchlist_log   = deque(maxlen=50)
@@ -1084,13 +1227,18 @@ def load_users():
         save_users()
 
 def save_users():
+    # Snapshot under _lock first (same pattern as save_alerted): json.dump
+    # iterates the dict, and a concurrent add_user() from another Telegram
+    # worker thread would raise "dictionary changed size during iteration".
+    with _lock:
+        snap = {uid: dict(u) for uid, u in users.items()}
     try:
         with open(USERS_FILE, "w", encoding="utf-8") as f:
-            json.dump(users, f, ensure_ascii=False, indent=2)
+            json.dump(snap, f, ensure_ascii=False, indent=2)
     except Exception as e:
         log.error(f"Save users error: {e}")
     if DB_OK:
-        db_sync_users(users)
+        db_sync_users(snap)
 
 def load_alerted():
     global alerted
@@ -1204,28 +1352,37 @@ def is_allowed(uid: str) -> bool:
     return uid in users and users[uid].get("active", False)
 
 def add_user(uid: str, name: str = "", username: str = "") -> bool:
+    # Locked like set_admin() below — handle_command runs on a 10-worker thread
+    # pool, so two /adduser calls (or /adduser racing refresh_user_info) could
+    # otherwise interleave a read-modify-write on the same `users` dict.
     uid = str(uid)
-    if uid in users:
-        users[uid]["active"] = True
-        save_users()
-        return False
-    users[uid] = {
-        "name": name or uid, "username": username,
-        "active": True, "is_admin": False,
-        "added": datetime.now().strftime("%Y-%m-%d"),
-    }
+    with _lock:
+        if uid in users:
+            users[uid]["active"] = True
+            is_new = False
+        else:
+            users[uid] = {
+                "name": name or uid, "username": username,
+                "active": True, "is_admin": False,
+                "added": datetime.now().strftime("%Y-%m-%d"),
+            }
+            is_new = True
     save_users()
-    return True
+    return is_new
 
 def remove_user(uid: str) -> bool:
     uid = str(uid)
     if uid == ADMIN_ID:
         return False
-    if uid in users:
-        users[uid]["active"] = False
+    with _lock:
+        if uid in users:
+            users[uid]["active"] = False
+            found = True
+        else:
+            found = False
+    if found:
         save_users()
-        return True
-    return False
+    return found
 
 def set_admin(uid: str, make: bool) -> bool:
     """Grant/revoke admin on a user. Primary ADMIN_ID can't be changed.
@@ -1243,7 +1400,12 @@ def set_admin(uid: str, make: bool) -> bool:
     return True
 
 def get_active_users() -> list[str]:
-    return [uid for uid, u in users.items() if u.get("active", False)]
+    # Locked: broadcast() calls this from the scanner thread while Telegram
+    # worker threads may be inserting into `users` (add_user) — iterating a
+    # dict during a concurrent insert raises RuntimeError. _lock is an RLock,
+    # so the /status path (which already holds _lock) can't deadlock here.
+    with _lock:
+        return [uid for uid, u in users.items() if u.get("active", False)]
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -3070,8 +3232,14 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
             return
         send_to(uid, "📦 Preparing backup...")
         try:
-            with sqlite3.connect(DB_PATH, timeout=10) as c:
+            # NOTE: `with sqlite3.connect(...) as c` only wraps the transaction
+            # (commit/rollback) — it does NOT close the connection. Close it
+            # explicitly so this doesn't leak a connection on every /backup.
+            c = sqlite3.connect(DB_PATH, timeout=10)
+            try:
                 c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            finally:
+                c.close()
         except Exception as e:
             log.warning(f"backup checkpoint failed: {e}")
         ok = send_document(uid, DB_PATH, caption=f"🗄️ stockbot.db backup\n<code>{DB_PATH}</code>")
@@ -3087,7 +3255,12 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
         parts = text.strip().split()
         confirmed = len(parts) >= 2 and parts[1].lower() == "confirm"
         try:
-            with sqlite3.connect(DB_PATH, timeout=10) as c:
+            # NOTE: `with sqlite3.connect(...) as c` only wraps the transaction
+            # (commit/rollback) — it does NOT close the connection. Close it
+            # explicitly (finally) so the early `return` below (unconfirmed path)
+            # can't leak a connection.
+            c = sqlite3.connect(DB_PATH, timeout=10)
+            try:
                 n = c.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
                 if not confirmed:
                     send_to(uid,
@@ -3098,6 +3271,9 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
                         f"2️⃣ Then send <code>/cleartrades confirm</code> to wipe.")
                     return
                 c.execute("DELETE FROM trades")
+                c.commit()
+            finally:
+                c.close()
             send_to(uid, f"✅ Cleared {n} old trades. Dashboard P&L / win-rate start clean now.")
             log.info(f"[cleartrades] admin {uid} deleted {n} trades")
         except Exception as e:
@@ -3201,26 +3377,31 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
                 if new_price is None:
                     send_to(uid, "❌ Format: ADD SYMBOL PRICE [SHARES]\nExample: ADD AUUD 1.75 100")
                     return
+                # ONE lock scope for read-compute-mutate: the old code released
+                # _lock after reading `existing`, recomputed, then re-locked to
+                # mutate — a concurrent SELL could pop the position in that gap
+                # and the mutation would land on an orphaned dict. The math +
+                # calc_targets() are pure/cheap, so holding the lock is fine.
                 with _lock:
                     existing = portfolio.get(uid, {}).get(sym_a)
-                if not existing:
-                    send_to(uid, f"❌ {sym_a} not in portfolio. Use <code>BUY {sym_a} {new_price:.2f}</code> to start tracking.")
-                else:
-                    old_entry = existing["entry"]
-                    old_qty   = existing.get("qty")
-                    if new_qty and old_qty:
-                        avg       = round((old_entry * old_qty + new_price * new_qty) / (old_qty + new_qty), 4)
-                        total_qty = old_qty + new_qty
-                    else:
-                        avg       = round((old_entry + new_price) / 2, 4)
-                        total_qty = (old_qty or 0) + (new_qty or 0) or None
-                    tgt = calc_targets(avg, {})
-                    with _lock:
+                    if existing:
+                        old_entry = existing["entry"]
+                        old_qty   = existing.get("qty")
+                        if new_qty and old_qty:
+                            avg       = round((old_entry * old_qty + new_price * new_qty) / (old_qty + new_qty), 4)
+                            total_qty = old_qty + new_qty
+                        else:
+                            avg       = round((old_entry + new_price) / 2, 4)
+                            total_qty = (old_qty or 0) + (new_qty or 0) or None
+                        tgt = calc_targets(avg, {})
                         existing["entry"] = avg
                         existing["stop"]  = tgt["stop"]
                         existing["t1"]    = tgt["t1"]
                         existing["t2"]    = tgt["t2"]
                         existing["qty"]   = total_qty
+                if not existing:
+                    send_to(uid, f"❌ {sym_a} not in portfolio. Use <code>BUY {sym_a} {new_price:.2f}</code> to start tracking.")
+                else:
                     save_portfolio()
                     if DB_OK:
                         db_save_position(uid, sym_a, existing)
@@ -3318,19 +3499,21 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
                     raise ValueError("bad price")
 
                 if action == "BUY":
+                    # Single lock scope (same reason as ADD above): don't let a
+                    # concurrent SELL pop the position between read and mutate.
                     with _lock:
                         pos = portfolio.get(uid, {}).get(sym_e)
-                    if pos is not None:
-                        # Open position — update portfolio
-                        old_entry = pos["entry"]
-                        tgt = calc_targets(new_price, {})
-                        with _lock:
+                        if pos is not None:
+                            # Open position — update portfolio
+                            old_entry = pos["entry"]
+                            tgt = calc_targets(new_price, {})
                             pos["entry"] = new_price
                             pos["stop"]  = tgt["stop"]
                             pos["t1"]    = tgt["t1"]
                             pos["t2"]    = tgt["t2"]
                             if new_qty is not None:
                                 pos["qty"] = new_qty
+                    if pos is not None:
                         save_portfolio()
                         if DB_OK:
                             db_save_position(uid, sym_e, pos)
@@ -3368,7 +3551,8 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
                 )
 
     elif cmd == "undo":
-        last = _last_removed.get(uid)
+        with _lock:   # write (SELL) and pop below both lock — keep the read consistent too
+            last = _last_removed.get(uid)
         if not last:
             send_to(uid, "❌ Nothing to undo.")
         else:
@@ -3448,6 +3632,78 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
     elif cmd == "/accept":
         send_to(uid, "✅ You have already accepted the terms.\nتم قبول الشروط مسبقًا.")
 
+    elif cmd == "/pnl":
+        # Summarizes paper_trades — synced in from the owner's OpenClaw agent
+        # (home PC), which paper-trades via Alpaca. Admin-only, matches the
+        # /backup / /cleartrades admin-tools pattern.
+        if not is_admin(uid):
+            send_to(uid, "❌ Admin only command.")
+            return
+        if not DB_OK:
+            send_to(uid, "❌ Database unavailable.")
+            return
+        conn = get_conn()
+        if not conn:
+            send_to(uid, "❌ Database unavailable.")
+            return
+        try:
+            rows = conn.execute("SELECT grade, status, pnl FROM paper_trades").fetchall()
+        except Exception as e:
+            send_to(uid, f"❌ /pnl query failed: {e}")
+            return
+        finally:
+            conn.close()
+
+        if not rows:
+            send_to(uid,
+                "📊 <b>Paper-Trade P&L</b>\n\n"
+                "No data yet — paper-trade sync hasn't received anything from OpenClaw."
+            )
+            return
+
+        def _is_win(status):  return "target" in (status or "").lower()
+        def _is_loss(status): return "stop"   in (status or "").lower()
+
+        open_n = closed_n = wins = losses = 0
+        total_pnl = 0.0
+        by_grade = {}   # grade -> {n, wins, pnl}  (n/wins/pnl count CLOSED trades only)
+        for r in rows:
+            status = r["status"] or ""
+            grade  = (r["grade"] or "?").upper()
+            pnl    = r["pnl"] or 0.0
+            win, loss = _is_win(status), _is_loss(status)
+            if win or loss:
+                g = by_grade.setdefault(grade, {"n": 0, "wins": 0, "pnl": 0.0})
+                closed_n  += 1
+                total_pnl += pnl
+                g["n"]    += 1
+                g["pnl"]  += pnl
+                if win:
+                    wins += 1
+                    g["wins"] += 1
+                else:
+                    losses += 1
+            else:
+                open_n += 1
+
+        win_rate = (wins / closed_n * 100) if closed_n else 0.0
+        lines = [
+            "📊 <b>Paper-Trade P&L</b>  (via OpenClaw sync)\n",
+            f"Closed trades : {closed_n}",
+            f"Win rate      : {win_rate:.0f}%  ({wins}W / {losses}L)",
+            f"Total P&L     : {'+' if total_pnl >= 0 else ''}${total_pnl:,.2f}",
+            f"Open positions: {open_n}",
+        ]
+        if by_grade:
+            lines.append("\n<b>By grade:</b>")
+            for grade, g in sorted(by_grade.items()):
+                gwr = (g["wins"] / g["n"] * 100) if g["n"] else 0.0
+                lines.append(
+                    f"  {grade}: {g['n']} trades, {gwr:.0f}% win, "
+                    f"{'+' if g['pnl'] >= 0 else ''}${g['pnl']:,.2f}"
+                )
+        send_to(uid, "\n".join(lines))
+
     elif cmd in ("/help", "/start"):
         admin_section = (
             "\n\n<b>Admin:</b>\n"
@@ -3458,7 +3714,8 @@ def handle_command(uid: str, text: str, sender_name: str = "", sender_username: 
             "/removeadmin 12345    → revoke admin\n"
             "/momentum on|off      → toggle momentum channel\n"
             "/inflow on|off        → require inflow+volume, catch earlier 💧\n"
-            "/backup               → send DB + state files to you 🗄️"
+            "/backup               → send DB + state files to you 🗄️\n"
+            "/pnl                  → paper-trade P&amp;L summary (OpenClaw sync)"
         ) if is_admin(uid) else ""
         send_to(uid,
             "📖 <b>Commands</b>\n\n"
@@ -3816,8 +4073,12 @@ def run_scan(requester_id=None):
         with _lock:
             if (time.time() - alerted.get(sym, 0)) < ALERT_COOLDOWN:
                 continue
-        # Re-alert gate: allow if fresh money flow confirms a new leg
-        prev = next((item for item in reversed(list(watchlist_log)) if item["sym"] == sym), None)
+        # Re-alert gate: allow if fresh money flow confirms a new leg.
+        # Snapshot the deque under _lock — a concurrent append from another
+        # /scan thread mid-iteration would raise "deque mutated during iteration".
+        with _lock:
+            wl_snap = list(watchlist_log)
+        prev = next((item for item in reversed(wl_snap) if item["sym"] == sym), None)
         curr_price = fv.get("price") or stock["price"]
         if prev and prev.get("price"):
             ratio     = curr_price / prev["price"]
@@ -3964,9 +4225,15 @@ def reset_stale_cooldowns():
         wb = fetch_webull(sym)
         if not wb or not wb.get("price"):
             continue
-        # Find alert price from watchlist log
+        # Find alert price from watchlist log. Snapshot under _lock first — this
+        # is the only place that iterated the raw deque directly; every other
+        # reader does `list(watchlist_log)` first, which (unlike this bare
+        # generator) can't be caught mid-iteration by a concurrent .append()/
+        # .clear() and raise "deque mutated during iteration".
+        with _lock:
+            wl_snapshot = list(watchlist_log)
         alert_price = next(
-            (item["price"] for item in watchlist_log if item["sym"] == sym), None
+            (item["price"] for item in wl_snapshot if item["sym"] == sym), None
         )
         if not alert_price:
             continue
@@ -4486,6 +4753,25 @@ def ema_scan():
         log.error(f"[EMA] scan error: {e}")
 
 
+def _safe_job(fn):
+    """Wrap a scheduled job so an uncaught exception can't kill the whole bot.
+    `schedule.run_pending()` re-raises whatever the job raises, and an exception
+    there would propagate out of the main loop and take the process down with it
+    — silently ending every alert. Most jobs already have their own top-level
+    try/except (defense in depth doesn't hurt); this wrapper is the backstop for
+    the ones that don't (e.g. run_scan, check_portfolio, reset_daily,
+    reset_stale_cooldowns, check_alert_performance) and for any future job that
+    forgets one. Logs the full traceback via the existing `log` and swallows it
+    so the scheduler keeps ticking."""
+    def _wrapped():
+        try:
+            fn()
+        except Exception:
+            log.exception(f"[scheduler] job {fn.__name__} raised — skipping this run")
+    _wrapped.__name__ = getattr(fn, "__name__", "job")
+    return _wrapped
+
+
 def main():
     if not acquire_lock():
         sys.exit(1)
@@ -4522,23 +4808,31 @@ def main():
         f"Send /help for all commands"
     )
 
-    run_scan()  # A/B RE-ENABLED 2026-06-19 — fires wide; OpenClaw analysis layer filters the fades before entry.
+    _safe_job(run_scan)()  # A/B RE-ENABLED 2026-06-19 — fires wide; OpenClaw analysis layer filters the fades before entry.
+    # (wrapped: run_scan has no top-level try/except, and this call happens before the
+    # scheduler loop even starts — an uncaught exception here would kill the bot at boot.)
     # A/B momentum scan DISABLED 2026-06-26: 30d data showed A/B averages -5% to -11% with a ~12%
     # pass-rate at EVERY price → zero tradeable entries, and it burned the Webull screener API for
     # nothing. GAP/EMA (their own Webull pull) + the gainer scanner remain. run_scan() is kept defined
     # so a manual /scan still works; only the auto-schedule is off. (It also carried the SPY-crash
     # market-alert broadcast — that goes quiet; re-add as a separate job if wanted.) Re-enable: uncomment.
     # schedule.every(SCAN_EVERY_MIN).minutes.do(run_scan)
-    schedule.every(2).minutes.do(check_portfolio)            # keep stop-loss/exit monitoring alive (it used to run inside run_scan)
-    schedule.every(15).minutes.do(reset_stale_cooldowns)
-    schedule.every().day.at("09:25").do(reset_daily)        # ET — clear yesterday's alerts before open
-    schedule.every(20).minutes.do(check_alert_performance)   # resolve T1/T2/stop through the day
+    schedule.every(2).minutes.do(_safe_job(check_portfolio))            # keep stop-loss/exit monitoring alive (it used to run inside run_scan)
+    schedule.every(15).minutes.do(_safe_job(reset_stale_cooldowns))
+    schedule.every().day.at("09:25").do(_safe_job(reset_daily))        # ET — clear yesterday's alerts before open
+    schedule.every(20).minutes.do(_safe_job(check_alert_performance))   # resolve T1/T2/stop through the day
     # schedule.every(1).minutes.do(orb_scan)                 # ORB DISABLED 2026-06-18 — 0 alerts all week even after loosening vol to 2.5x. Code kept; re-enable by uncommenting.
-    schedule.every(10).minutes.do(gap_scan)                  # gap-up-on-news pullback setups
-    schedule.every(15).minutes.do(ema_scan)                  # EMA100 breakout — ENABLED (swapped in for A/B)
-    schedule.every(15).minutes.do(spy_market_alert)          # market-crash safety alert (re-added after A/B run_scan was disabled)
+    schedule.every(10).minutes.do(_safe_job(gap_scan))                  # gap-up-on-news pullback setups
+    schedule.every(15).minutes.do(_safe_job(ema_scan))                  # EMA100 breakout — ENABLED (swapped in for A/B)
+    schedule.every(15).minutes.do(_safe_job(spy_market_alert))          # market-crash safety alert (re-added after A/B run_scan was disabled)
     while True:
-        schedule.run_pending()
+        try:
+            schedule.run_pending()
+        except Exception:
+            # Last-resort backstop — _safe_job should catch everything inside each
+            # job, but this guards against errors in `schedule` itself so one bad
+            # tick can never take the whole bot down.
+            log.exception("[scheduler] run_pending() raised")
         time.sleep(5)    # scheduler tick — tighter so scans fire close to their scheduled minute
 
 
@@ -4778,9 +5072,16 @@ def col_label(col, lang="en"):
 #  DATABASE
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def q(sql: str, params=None) -> pd.DataFrame:
+    # NOTE: `with sqlite3.connect(...) as c` only wraps the transaction
+    # (commit/rollback) — it does NOT close the connection. This is the
+    # dashboard's main query function (called on every callback/refresh), so
+    # leaving that unclosed leaked a connection per query. Close explicitly.
     try:
-        with sqlite3.connect(DB_PATH, timeout=5) as c:
+        c = sqlite3.connect(DB_PATH, timeout=5)
+        try:
             return pd.read_sql(sql, c, params=params)
+        finally:
+            c.close()
     except Exception as e:
         print(f"[DB] {e}")
         return pd.DataFrame()
@@ -5880,6 +6181,46 @@ def api_notify():
     target_uid = str(body.get("to") or ADMIN_ID)
     ok = send_to(target_uid, _html.escape(text))   # relay as-is (no source label), escaped for HTML parse_mode
     return _api_jsonify({"ok": bool(ok), "sent_to": target_uid})
+
+@server.route("/api/trades/sync", methods=["POST"])
+def api_trades_sync():
+    # OpenClaw (home PC) paper-trades via Alpaca and used to keep records only in a
+    # local JSON file the bot never saw. It PUSHES its trade log here so the bot's
+    # own DB (and /pnl) can see it too. Token-gated like the rest. Upsert on
+    # (symbol, opened_at) — see db_sync_paper_trades / the unique index in migrate_db.
+    if not API_TOKEN:
+        return _api_jsonify({"error": "API disabled — set API_TOKEN env var"}), 503
+    token = _api_request.args.get("token") or _api_request.headers.get("X-API-Token", "")
+    if token != API_TOKEN:
+        return _api_jsonify({"error": "unauthorized"}), 401
+    if not DB_OK:
+        return _api_jsonify({"error": "db unavailable"}), 503
+    body = _api_request.get_json(silent=True) or {}
+    trades = body.get("trades")
+    if not isinstance(trades, list) or not trades:
+        return _api_jsonify({"error": "need a non-empty 'trades' list"}), 400
+    trades = trades[:500]   # defensive cap — a runaway batch shouldn't stall the request
+    inserted, updated = db_sync_paper_trades(trades)
+    return _api_jsonify({"ok": True, "inserted": inserted, "updated": updated})
+
+@server.route("/api/trades")
+def api_trades():
+    # Read side of the paper-trade sync — lets OpenClaw (or the dashboard) confirm
+    # what the bot actually stored. Token-gated like the rest.
+    if not API_TOKEN:
+        return _api_jsonify({"error": "API disabled — set API_TOKEN env var"}), 503
+    token = _api_request.args.get("token") or _api_request.headers.get("X-API-Token", "")
+    if token != API_TOKEN:
+        return _api_jsonify({"error": "unauthorized"}), 401
+    try:
+        days = max(1, min(int(_api_request.args.get("days", "30")), 180))
+    except ValueError:
+        days = 30
+    status = (_api_request.args.get("status") or "").strip() or None
+    grade_arg = _api_request.args.get("grade")
+    grades = [g.strip() for g in grade_arg.split(",") if g.strip()] if grade_arg else None
+    trades = db_get_paper_trades(status=status, grades=grades, days=days)
+    return _api_jsonify({"count": len(trades), "trades": trades})
 
 def _session_auth():
     """Trusted identity from the signed session cookie, or None if not logged in.
