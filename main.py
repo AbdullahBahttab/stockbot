@@ -4822,8 +4822,8 @@ def main():
     schedule.every().day.at("09:25").do(_safe_job(reset_daily))        # ET — clear yesterday's alerts before open
     schedule.every(20).minutes.do(_safe_job(check_alert_performance))   # resolve T1/T2/stop through the day
     # schedule.every(1).minutes.do(orb_scan)                 # ORB DISABLED 2026-06-18 — 0 alerts all week even after loosening vol to 2.5x. Code kept; re-enable by uncommenting.
-    schedule.every(10).minutes.do(_safe_job(gap_scan))                  # gap-up-on-news pullback setups
-    schedule.every(15).minutes.do(_safe_job(ema_scan))                  # EMA100 breakout — ENABLED (swapped in for A/B)
+    # schedule.every(10).minutes.do(_safe_job(gap_scan))               # GAP DISABLED 2026-07-03 — owner dropped GAP/EMA; OpenClaw no longer consumes them, so scanning just burned Webull+Haiku for nothing. Code kept; re-enable by uncommenting.
+    # schedule.every(15).minutes.do(_safe_job(ema_scan))               # EMA DISABLED 2026-07-03 — same reason as GAP above. Strategy focus moved to D2/ERN/SYM (OpenClaw-side) + GAINER.
     schedule.every(15).minutes.do(_safe_job(spy_market_alert))          # market-crash safety alert (re-added after A/B run_scan was disabled)
     while True:
         try:
