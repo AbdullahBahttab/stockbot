@@ -6181,7 +6181,15 @@ def api_notify():
             lines.append(lvl)
         text = "\n".join(lines)
     import html as _html
-    target_uid = str(body.get("to") or ADMIN_ID)
+    to_raw = body.get("to")
+    # "to":"all" (or "broadcast"/"*") reaches every subscribed bot user, same as an
+    # AB/GAP/EMA scan alert — added 2026-07-10 so OpenClaw's ERN/SYM strategy picks
+    # (previously owner-DM only) can reach the same audience. Default is unchanged:
+    # no "to" still means owner-only DM (ADMIN_ID), so existing callers are unaffected.
+    if str(to_raw).strip().lower() in ("all", "broadcast", "*"):
+        broadcast(_html.escape(text))
+        return _api_jsonify({"ok": True, "sent_to": "all"})
+    target_uid = str(to_raw or ADMIN_ID)
     ok = send_to(target_uid, _html.escape(text))   # relay as-is (no source label), escaped for HTML parse_mode
     return _api_jsonify({"ok": bool(ok), "sent_to": target_uid})
 
