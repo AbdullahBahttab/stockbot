@@ -6141,7 +6141,16 @@ def api_gainers():
     if session is None:
         return _api_jsonify({"market": "CLOSED", "session": None, "count": 0, "gainers": []})
     try:
-        rows = fetch_gainers(session)
+        if session == "OPEN":
+            # Webull screener = direct exchange data, fresher than the stockanalysis.com scrape
+            # (2026-07-10: JLHL showed the scrape lagging the true price by 500+ points during
+            # a fast move). fetch_screener_webull is ONLY reliable for regular-session % change
+            # (see its docstring) — PRE/AFTER keep the scrape below, which is what it's built for.
+            rows = fetch_screener_webull({"min_change": 0}, limit=limit)
+            if not rows:
+                rows = fetch_gainers(session)   # fall back if the Webull screener errors/empty
+        else:
+            rows = fetch_gainers(session)
     except Exception as e:
         return _api_jsonify({"error": str(e)}), 500
     return _api_jsonify({"market": "OPEN", "session": session, "count": len(rows[:limit]), "gainers": rows[:limit]})
