@@ -859,14 +859,17 @@ GAP_OPEN_MIN    = 360     # GAP is a bounce held for HOURS — give it the sessi
 MOMENTUM_ALERTS = False   # separate "high-risk momentum" channel for big runners the
                           # strict filter rejects (unverified pumps). OFF by default —
                           # admin can enable live with /momentum on.
-AB_BROADCAST    = False   # A/B grade alerts: when False, scan + LOG them silently (so the
+AB_BROADCAST    = True    # A/B grade alerts: when False, scan + LOG them silently (so the
                           # /api/alerts feed + OpenClaw still see them) but DON'T broadcast to
                           # Telegram. OpenClaw analyzes A/B and DMs only the good ones. Set True
-                          # to restore raw A/B alerts to all bot users.
-GAP_BROADCAST   = False   # Same as AB_BROADCAST but for GAP: scan + LOG silently (OpenClaw still
+                          # to restore raw A/B alerts to all bot users. (Re-enabled 2026-07-10 —
+                          # users reported getting no alerts at all since this was silenced.)
+GAP_BROADCAST   = True    # Same as AB_BROADCAST but for GAP: scan + LOG silently (OpenClaw still
                           # sees them on /api/alerts and relays its analyzed verdict) — no raw GAP
                           # broadcast to Telegram. Set True to restore raw GAP alerts to bot users.
-EMA_BROADCAST   = False   # Same for EMA: logged for OpenClaw, not broadcast raw. Set True to restore.
+                          # (Re-enabled 2026-07-10 alongside AB_BROADCAST.)
+EMA_BROADCAST   = True    # Same for EMA: logged for OpenClaw, not broadcast raw. Set True to restore.
+                          # (Re-enabled 2026-07-10 alongside AB_BROADCAST.)
 INFLOW_REQUIRED = True    # when ON, only alert stocks with confirmed inflow (OBV↑) +
                           # volume surge, caught earlier (lower change bar) — strict/
                           # high-quality. Default ON per user. /inflow off = simple/more.
